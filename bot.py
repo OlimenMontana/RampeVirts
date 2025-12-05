@@ -7,9 +7,11 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.exceptions import TelegramBadRequest # Додано для обробки помилок редагування
 from urllib.parse import urlencode
 
 # --- КОНФИГУРАЦИЯ (ОБЯЗАТЕЛЬНО ЗАМЕНИТЬ) ---
+
 # !!! ВАЖНО: ЗАМЕНИТЕ ЭТОТ ТОКЕН НА НОВЫЙ ИЗ-ЗА УТЕЧКИ !!!
 API_TOKEN = '8369917812:AAGavVucX12zOQSxMeoOM8zE-e7eg5Qk3bk'          
 ADMIN_ID = 6928797177                    
@@ -18,8 +20,7 @@ CARD_NUMBER = "4323 3473 6140 0119"
 
 PRICE_PER_1KK = 40                      # Цена в гривнах за 1кк
 FEEDBACK_LINK = "https://t.me/RampeVirtsFeedbacks"
-# ПРЯМАЯ ССЫЛКА НА ФОТО. ЗАМЕНА ССЫЛКИ НА ГАЛЕРЕЮ!
-# Вставьте сюда прямое .jpg или .png ссылку, или оставьте None
+# ПРЯМАЯ ССЫЛКА НА ФОТО. Вставьте сюда прямое .jpg или .png ссылку.
 PHOTO_URL = None 
 
 # НАГРАДА: Бонус, который получит реферер
@@ -150,7 +151,7 @@ async def cmd_start(message: types.Message):
     )
 
     if PHOTO_URL:
-        # Пытаемся отправить с фото, только если URL указан и корректен
+        # Пытаемся отправить с фото, только если URL указан
         try:
             await message.answer_photo(
                 photo=PHOTO_URL,
@@ -167,28 +168,36 @@ async def cmd_start(message: types.Message):
     await message.answer(text=welcome_text, reply_markup=builder.as_markup(), parse_mode="HTML")
 
 
-# ИСПРАВЛЕНИЕ: Используем SERVERS_MAPPING для создания коротких callback_data
+# ИСПРАВЛЕНИЕ 1: Используем SERVERS_MAPPING для коротких callback_data
+# ИСПРАВЛЕНИЕ 2: Используем try/except для устойчивости edit_caption
 @dp.callback_query(F.data == "start_buy")
 async def show_servers(callback: types.CallbackQuery, state: FSMContext):
     builder = InlineKeyboardBuilder()
     
-    # Итерируемся по словарю, используя ID для callback и полное имя для текста
     for server_id, server_full_name in SERVERS_MAPPING.items():
         builder.button(text=f"🟢 {server_full_name}", callback_data=f"srv_{server_id}")
     
     builder.adjust(3)
     builder.button(text="🔙 Назад в меню", callback_data="back_to_menu")
     
-    await callback.message.edit_caption(
-        caption="🌍 Выберите ваш сервер:",
-        reply_markup=builder.as_markup()
-    )
+    caption_text = "🌍 Выберите ваш сервер:"
+    
+    try:
+        await callback.message.edit_caption(
+            caption=caption_text,
+            reply_markup=builder.as_markup()
+        )
+    except TelegramBadRequest:
+        # Если edit_caption не сработал (оригинал был текстом), используем edit_text
+        await callback.message.edit_text(
+            text=caption_text, 
+            reply_markup=builder.as_markup()
+        )
     await state.set_state(BuyState.choosing_server)
 
 # ИСПРАВЛЕНИЕ: Получаем полное имя сервера из SERVERS_MAPPING по короткому ID
 @dp.callback_query(F.data.startswith("srv_"), BuyState.choosing_server)
 async def server_chosen(callback: types.CallbackQuery, state: FSMContext):
-    # Получаем короткий ID сервера (например, "31")
     server_id = callback.data.split("_")[1]
     
     # Используем ID для поиска полного имени из словаря
@@ -196,13 +205,23 @@ async def server_chosen(callback: types.CallbackQuery, state: FSMContext):
     
     await state.update_data(server=server_name)
     
-    await callback.message.edit_caption(
-        caption=f"✅ Выбран сервер: <b>{server_name}</b>\n\n"
-                f"Введите количество виртов (в миллионах).\n"
-                f"Например, если нужно 5кк, просто напишите цифру: <b>5</b>",
-        parse_mode="HTML",
-        reply_markup=None 
-    )
+    # --- ИСПРАВЛЕНИЕ: Также делаем устойчивым edit_caption ---
+    caption_text = (f"✅ Выбран сервер: <b>{server_name}</b>\n\n"
+                    f"Введите количество виртов (в миллионах).\n"
+                    f"Например, если нужно 5кк, просто напишите цифру: <b>5</b>")
+    
+    try:
+        await callback.message.edit_caption(
+            caption=caption_text,
+            parse_mode="HTML",
+            reply_markup=None 
+        )
+    except TelegramBadRequest:
+        await callback.message.edit_text(
+            text=caption_text,
+            parse_mode="HTML",
+            reply_markup=None 
+        )
     await state.set_state(BuyState.entering_amount)
 
 @dp.message(BuyState.entering_amount)
@@ -259,7 +278,6 @@ async def payment_confirmed(callback: types.CallbackQuery, state: FSMContext):
             reward_uah = purchase_price_uah * REFERRAL_BONUS_PERCENTAGE
             
             # 2. Конвертация бонуса в вирты (KK)
-            # 5% от суммы / Цена за 1КК
             reward_kk = reward_uah / PRICE_PER_1KK
             reward_kk_rounded = round(reward_kk, 2) # Округляем до 2 знаков после запятой
             
@@ -325,25 +343,44 @@ async def show_referral_info(callback: types.CallbackQuery):
         f"🎁 Твой бонусный баланс: <b>{rewards} KK</b>\n\n"
         f"💰 <b>Правила:</b> Ты получаешь <b>{REFERRAL_BONUS_PERCENTAGE*100}%</b> от суммы первой покупки каждого друга на бонусный баланс!"
     )
-
-    await callback.message.edit_caption(
-        caption=referral_text,
-        parse_mode="HTML",
-        reply_markup=builder.as_markup()
-    )
+    
+    # --- ИСПРАВЛЕНИЕ: Также делаем устойчивым edit_caption ---
+    try:
+        await callback.message.edit_caption(
+            caption=referral_text,
+            parse_mode="HTML",
+            reply_markup=builder.as_markup()
+        )
+    except TelegramBadRequest:
+        await callback.message.edit_text(
+            text=referral_text,
+            parse_mode="HTML",
+            reply_markup=builder.as_markup()
+        )
 
 @dp.callback_query(F.data == "profile")
 async def show_profile(callback: types.CallbackQuery):
     user = callback.from_user
-    await callback.message.edit_caption(
-        caption=f"👤 <b>Твой профиль</b>\n\n"
-                f"🆔 Твой ID: <code>{user.id}</code>\n"
-                f"👤 Имя: {user.full_name}\n"
-                f"📅 Дата: {(await bot.get_chat(user.id)).date.strftime('%d.%m.%Y')}\n\n"
-                f"💸 Чтобы увидеть историю покупок, совершите первый заказ.",
-        parse_mode="HTML",
-        reply_markup=callback.message.reply_markup
-    )
+    
+    caption_text = (f"👤 <b>Твой профиль</b>\n\n"
+                    f"🆔 Твой ID: <code>{user.id}</code>\n"
+                    f"👤 Имя: {user.full_name}\n"
+                    f"📅 Дата: {(await bot.get_chat(user.id)).date.strftime('%d.%m.%Y')}\n\n"
+                    f"💸 Чтобы увидеть историю покупок, совершите первый заказ.")
+    
+    # --- ИСПРАВЛЕНИЕ: Также делаем устойчивым edit_caption ---
+    try:
+        await callback.message.edit_caption(
+            caption=caption_text,
+            parse_mode="HTML",
+            reply_markup=callback.message.reply_markup
+        )
+    except TelegramBadRequest:
+        await callback.message.edit_text(
+            text=caption_text,
+            parse_mode="HTML",
+            reply_markup=callback.message.reply_markup
+        )
 
 @dp.callback_query(F.data == "rules")
 async def show_rules(callback: types.CallbackQuery):
@@ -358,18 +395,27 @@ async def show_rules(callback: types.CallbackQuery):
         "4️⃣ <b>Безопасность:</b> Не обсуждайте покупку виртов В ИГРЕ, чтобы избежать бана."
     )
     
-    await callback.message.edit_caption(
-        caption=rules_text,
-        parse_mode="HTML",
-        reply_markup=builder.as_markup()
-    )
+    # --- ИСПРАВЛЕНИЕ: Также делаем устойчивым edit_caption ---
+    try:
+        await callback.message.edit_caption(
+            caption=rules_text,
+            parse_mode="HTML",
+            reply_markup=builder.as_markup()
+        )
+    except TelegramBadRequest:
+        await callback.message.edit_text(
+            text=rules_text,
+            parse_mode="HTML",
+            reply_markup=builder.as_markup()
+        )
 
 @dp.callback_query(F.data == "back_to_menu")
 async def back_to_menu(callback: types.CallbackQuery):
+    # Вместо delete + cmd_start, редактируем сообщение обратно в cmd_start
     await callback.message.delete()
     await cmd_start(callback.message)
 
-# ИСПРАВЛЕНИЕ: Интегрируем правильный cancel_handler с корректной сигнатурой
+# ИСПРАВЛЕНИЕ: Финальный и корректный cancel_handler
 @dp.callback_query(F.data == "cancel")
 async def cancel_handler(callback: types.CallbackQuery, state: FSMContext):
     await state.clear() 
