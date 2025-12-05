@@ -20,7 +20,7 @@ CARD_NUMBER = "4323 3473 6140 0119"
 
 PRICE_PER_1KK = 40                      # Цена в гривнах за 1кк
 FEEDBACK_LINK = "https://t.me/RampeVirtsFeedbacks"
-# ПРЯМАЯ ССЫЛКА НА ФОТО. Вставьте сюда прямое .jpg или .png ссылку.
+# ПРЯМАЯ ССЫЛКА НА ФОТО. Вставьте сюда прямое .jpg или .png ссылку, или оставьте None
 PHOTO_URL = None 
 
 # НАГРАДА: Бонус, который получит реферер
@@ -195,7 +195,8 @@ async def show_servers(callback: types.CallbackQuery, state: FSMContext):
         )
     await state.set_state(BuyState.choosing_server)
 
-# ИСПРАВЛЕНИЕ: Получаем полное имя сервера из SERVERS_MAPPING по короткому ID
+# ИСПРАВЛЕНИЕ 1: Получаем полное имя сервера из SERVERS_MAPPING по короткому ID
+# ИСПРАВЛЕНИЕ 2: Также делаем устойчивым edit_caption
 @dp.callback_query(F.data.startswith("srv_"), BuyState.choosing_server)
 async def server_chosen(callback: types.CallbackQuery, state: FSMContext):
     server_id = callback.data.split("_")[1]
@@ -205,7 +206,6 @@ async def server_chosen(callback: types.CallbackQuery, state: FSMContext):
     
     await state.update_data(server=server_name)
     
-    # --- ИСПРАВЛЕНИЕ: Также делаем устойчивым edit_caption ---
     caption_text = (f"✅ Выбран сервер: <b>{server_name}</b>\n\n"
                     f"Введите количество виртов (в миллионах).\n"
                     f"Например, если нужно 5кк, просто напишите цифру: <b>5</b>")
@@ -357,18 +357,32 @@ async def show_referral_info(callback: types.CallbackQuery):
             parse_mode="HTML",
             reply_markup=builder.as_markup()
         )
+    await callback.answer()
+
 
 @dp.callback_query(F.data == "profile")
 async def show_profile(callback: types.CallbackQuery):
     user = callback.from_user
+    registration_date = "неизвестна"
+
+    # --- ВИПРАВЛЕННЯ: Безпечне отримання дати реєстрації (це виправляло падіння) ---
+    try:
+        chat_info = await bot.get_chat(user.id)
+        if chat_info.date:
+            registration_date = chat_info.date.strftime('%d.%m.%Y')
+    except Exception:
+        registration_date = "недоступна"
+    # --- КІНЕЦЬ ВИПРАВЛЕННЯ ---
     
-    caption_text = (f"👤 <b>Твой профиль</b>\n\n"
-                    f"🆔 Твой ID: <code>{user.id}</code>\n"
-                    f"👤 Имя: {user.full_name}\n"
-                    f"📅 Дата: {(await bot.get_chat(user.id)).date.strftime('%d.%m.%Y')}\n\n"
-                    f"💸 Чтобы увидеть историю покупок, совершите первый заказ.")
+    caption_text = (
+        f"👤 <b>Твой профиль</b>\n\n"
+        f"🆔 Твой ID: <code>{user.id}</code>\n"
+        f"👤 Имя: {user.full_name}\n"
+        f"📅 Дата регистрации: {registration_date}\n\n"
+        f"💸 Чтобы увидеть историю покупок, совершите первый заказ."
+    )
     
-    # --- ИСПРАВЛЕНИЕ: Также делаем устойчивым edit_caption ---
+    # --- ИСПРАВЛЕНИЕ: Устойчивость edit_caption ---
     try:
         await callback.message.edit_caption(
             caption=caption_text,
@@ -381,6 +395,7 @@ async def show_profile(callback: types.CallbackQuery):
             parse_mode="HTML",
             reply_markup=callback.message.reply_markup
         )
+    await callback.answer() # Прибирає годинник з кнопки
 
 @dp.callback_query(F.data == "rules")
 async def show_rules(callback: types.CallbackQuery):
@@ -395,7 +410,7 @@ async def show_rules(callback: types.CallbackQuery):
         "4️⃣ <b>Безопасность:</b> Не обсуждайте покупку виртов В ИГРЕ, чтобы избежать бана."
     )
     
-    # --- ИСПРАВЛЕНИЕ: Также делаем устойчивым edit_caption ---
+    # --- ИСПРАВЛЕНИЕ: Устойчивость edit_caption ---
     try:
         await callback.message.edit_caption(
             caption=rules_text,
@@ -408,12 +423,13 @@ async def show_rules(callback: types.CallbackQuery):
             parse_mode="HTML",
             reply_markup=builder.as_markup()
         )
+    await callback.answer()
 
 @dp.callback_query(F.data == "back_to_menu")
 async def back_to_menu(callback: types.CallbackQuery):
-    # Вместо delete + cmd_start, редактируем сообщение обратно в cmd_start
     await callback.message.delete()
     await cmd_start(callback.message)
+    await callback.answer()
 
 # ИСПРАВЛЕНИЕ: Финальный и корректный cancel_handler
 @dp.callback_query(F.data == "cancel")
