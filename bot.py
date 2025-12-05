@@ -2,18 +2,17 @@ import asyncio
 import logging
 import sqlite3
 import math 
-import os # Додано для змінних середовища
+import os 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest
-from aiohttp import web # ДОДАНО для запуску веб-сервера на Render
+from aiohttp import web 
 
-# --- КОНФИГУРАЦИЯ (ЧИТАЕТСЯ ИЗ ПЕРЕМЕННЫХ СРЕДЫ) ---
+# --- КОНФИГУРАЦИЯ ---
 
-# Читаем токен и ID из Environment Variables (это безопасно)
 API_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')          
 ADMIN_ID = int(os.getenv('TELEGRAM_ADMIN_ID')) if os.getenv('TELEGRAM_ADMIN_ID') else None 
 
@@ -58,7 +57,6 @@ db = None
 # --- БАЗА ДАННЫХ (SQLite) ---
 
 def db_start():
-    """Инициализация базы данных и создание таблицы 'users', если она не существует."""
     global db
     db = sqlite3.connect('virts_shop.db')
     cursor = db.cursor()
@@ -75,7 +73,6 @@ def db_start():
     db.commit()
 
 def add_user(user_id, referrer_id=None):
-    """Добавление нового пользователя и фиксация реферера."""
     cursor = db.cursor()
     cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
     if cursor.fetchone() is None:
@@ -83,13 +80,11 @@ def add_user(user_id, referrer_id=None):
         db.commit()
     
 def get_user_data(user_id):
-    """Получение данных пользователя."""
     cursor = db.cursor()
     cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
     return cursor.fetchone()
 
 def update_referrer_stats(referrer_id, reward_kk):
-    """Обновление статистики реферера после первой покупки приглашенного с учетом награды."""
     cursor = db.cursor()
     cursor.execute("""
         UPDATE users SET referrals_count = referrals_count + 1, 
@@ -99,7 +94,6 @@ def update_referrer_stats(referrer_id, reward_kk):
     db.commit()
 
 def mark_as_old(user_id):
-    """Отмечаем пользователя как 'не новый', чтобы не вознаграждать реферера дважды."""
     cursor = db.cursor()
     cursor.execute("UPDATE users SET is_new = 0 WHERE user_id = ?", (user_id,))
     db.commit()
@@ -109,6 +103,10 @@ class BuyState(StatesGroup):
     """Состояния для процесса покупки."""
     choosing_server = State()
     entering_amount = State()
+    # НОВЫЙ ШАГ: Запрос никнейма
+    entering_nickname = State() 
+    # НОВЫЙ ШАГ: Ожидание чека
+    waiting_for_proof = State() 
 
 # --- ХЕНДЛЕРЫ ---
 
@@ -162,13 +160,12 @@ async def cmd_start(message: types.Message):
     await message.answer(text=welcome_text, reply_markup=builder.as_markup(), parse_mode="HTML")
 
 
-# ИСПРАВЛЕНИЕ: Устойчивость edit_caption
 @dp.callback_query(F.data == "start_buy")
 async def show_servers(callback: types.CallbackQuery, state: FSMContext):
     builder = InlineKeyboardBuilder()
     
     for server_id, server_full_name in SERVERS_MAPPING.items():
-        builder.button(text=f"🟢 {server_full_name}", callback_data=f"srv_{server_id}")
+        builder.button(text=f" {server_full_name}", callback_data=f"srv_{server_id}")
     
     builder.adjust(3)
     builder.button(text="🔙 Назад в меню", callback_data="back_to_menu")
@@ -188,7 +185,6 @@ async def show_servers(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(BuyState.choosing_server)
 
 
-# ИСПРАВЛЕНИЕ: Устойчивость edit_caption
 @dp.callback_query(F.data.startswith("srv_"), BuyState.choosing_server)
 async def server_chosen(callback: types.CallbackQuery, state: FSMContext):
     server_id = callback.data.split("_")[1]
@@ -233,33 +229,73 @@ async def process_amount(message: types.Message, state: FSMContext):
 
     await state.update_data(amount=amount_kk, price=total_price)
 
+    # --- НОВЫЙ ШАГ: ЗАПРОС НИКНЕЙМА ---
+    await message.answer(
+        f"📝 <b>Шаг 2/3: Никнейм</b>\n\n"
+        f"Пожалуйста, введите ваш никнейм в игре (Например: Name_Surname) для получения виртов."
+    )
+    await state.set_state(BuyState.entering_nickname)
+
+
+@dp.message(BuyState.entering_nickname)
+async def process_nickname(message: types.Message, state: FSMContext):
+    nickname = message.text
+    if len(nickname.split('_')) < 2 or len(nickname) < 4:
+         await message.answer("❌ Некорректный никнейм. Ник должен быть в формате Name_Surname.")
+         return
+         
+    await state.update_data(nickname=nickname)
+    data = await state.get_data()
+
+    total_price = data['price']
+    server_name = data['server']
+    amount_kk = data['amount']
+
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ Я оплатил", callback_data="payment_confirm")
     builder.button(text="❌ Отмена", callback_data="cancel")
     builder.adjust(1)
 
+    # --- ВЫДАЧА РЕКВИЗИТОВ ---
     await message.answer(
-        f"🧾 <b>Счет на оплату</b>\n"
+        f"🧾 <b>Шаг 3/3: Счет на оплату</b>\n"
         f"--------------------------\n"
         f"🌍 Сервер: <b>{server_name}</b>\n"
+        f"👤 Ник: <b>{nickname}</b>\n"
         f"📦 Товар: <b>{amount_kk} KK</b> (миллионов)\n"
         f"💵 К оплате: <b>{total_price} грн</b>\n"
         f"--------------------------\n\n"
         f"💳 Реквизиты:\n"
         f"<code>{CARD_NUMBER}</code>\n\n"
-        f"⚠️ После перевода нажмите кнопку <b>«Я оплатил»</b> ниже и ожидайте выдачи.",
+        f"⚠️ После перевода нажмите кнопку <b>«Я оплатил»</b> ниже.",
         reply_markup=builder.as_markup(),
         parse_mode="HTML"
     )
+    await state.set_state(BuyState.waiting_for_proof) # Переход в состояние ожидания чека
 
-@dp.callback_query(F.data == "payment_confirm")
-async def payment_confirmed(callback: types.CallbackQuery, state: FSMContext):
+
+@dp.callback_query(F.data == "payment_confirm", BuyState.waiting_for_proof)
+async def payment_confirmed_button(callback: types.CallbackQuery, state: FSMContext):
+    
+    # --- СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЮ ---
+    await callback.message.edit_text(
+        "📸 <b>Отлично! Теперь ожидаем чек.</b>\n\n"
+        "Пожалуйста, **отправьте скриншот или фотографию чека** об оплате в чат.\n"
+        "Это нужно для быстрой проверки и выдачи вашего заказа.",
+        parse_mode="HTML"
+    )
+    
+    await callback.answer()
+
+# --- НОВЫЙ ХЕНДЛЕР: Прием чека и пересылка админу ---
+@dp.message(F.photo, BuyState.waiting_for_proof)
+async def process_payment_proof(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    user = callback.from_user
+    user = message.from_user
     user_db_data = get_user_data(user.id)
     
     # --- ЛОГИКА РЕФЕРАЛКИ (5% от покупки) ---
-    if user_db_data and user_db_data[2] == 1: # Проверяем, является ли пользователь новым (is_new == 1)
+    if user_db_data and user_db_data[2] == 1: 
         referrer_id = user_db_data[1]
         purchase_price_uah = data.get('price', 0)
         
@@ -275,37 +311,87 @@ async def payment_confirmed(callback: types.CallbackQuery, state: FSMContext):
                 await bot.send_message(referrer_id, 
                     f"🎉 <b>ПОЗДРАВЛЯЕМ!</b>\n"
                     f"Ваш друг (<a href='tg://user?id={user.id}'>{user.full_name}</a>) совершил первую покупку на сумму {purchase_price_uah} грн!\n"
-                    f"На ваш бонусный счет зачислено <b>{reward_kk_rounded} KK</b> ({REFERRAL_BONUS_PERCENTAGE*100}% от покупки).", 
+                    f"На ваш бонусный счет зачислено <b>{reward_kk_rounded} KK</b>.", 
                     parse_mode="HTML")
             except Exception as e:
                 logging.warning(f"Не удалось уведомить реферера {referrer_id}: {e}")
     # -------------------------
 
-    admin_text = (
-        f"🚨 <b>НОВЫЙ ЗАКАЗ!</b>\n\n"
+    # --- СООБЩЕНИЕ АДМИНУ С ЧЕКОМ ---
+    admin_caption = (
+        f"🔥 <b>НОВЫЙ ЗАКАЗ И ЧЕК!</b>\n"
+        f"--------------------------\n"
         f"👤 Покупатель: <a href='tg://user?id={user.id}'>{user.full_name}</a> (@{user.username or 'нет юзернейма'})\n"
         f"🆔 ID: <code>{user.id}</code>\n"
         f"🌍 Сервер: <b>{data.get('server', 'N/A')}</b>\n"
+        f"🎮 Ник: <b>{data.get('nickname', 'N/A')}</b>\n"
         f"📦 Сумма виртов: <b>{data.get('amount', 'N/A')} кк</b>\n"
         f"💰 Ожидаемый приход: <b>{data.get('price', 'N/A')} грн</b>\n\n"
-        f"⚠️ Проверь поступление на карту и свяжись с покупателем!"
+        f"<b>⚠️ ВЫДАТЬ ВИРТЫ</b>"
     )
     
     if ADMIN_ID:
         try:
-            await bot.send_message(chat_id=ADMIN_ID, text=admin_text, parse_mode="HTML")
+            # Пересылаем фото админу с деталями заказа
+            await bot.send_photo(
+                chat_id=ADMIN_ID, 
+                photo=message.photo[-1].file_id, 
+                caption=admin_caption, 
+                parse_mode="HTML"
+            )
         except Exception as e:
-            logging.error(f"Ошибка отправки сообщения админу {ADMIN_ID}: {e}")
+            logging.error(f"Ошибка отправки чека админу {ADMIN_ID}: {e}")
 
-    await callback.message.edit_text(
-        "✅ <b>Заявка отправлена администратору!</b>\n\n"
-        "Мы проверим платеж и свяжемся с вами для выдачи валюты.",
+    # --- ОТВЕТ ПОКУПАТЕЛЮ ---
+    await message.answer(
+        "✅ <b>Чек принят!</b>\n\n"
+        "Ваша заявка отправлена администратору. Ожидайте, мы проверим оплату и свяжемся с вами для выдачи.",
         parse_mode="HTML"
     )
+    
     await state.clear()
 
 
-# ИСПРАВЛЕНИЕ: Устойчивость edit_caption
+@dp.message(F.text, BuyState.waiting_for_proof)
+async def process_payment_proof_error(message: types.Message, state: FSMContext):
+    await message.answer("❌ Ожидается **фотография** или **скриншот** чека. Пожалуйста, отправьте его.")
+
+# --- ХЕНДЛЕРЫ МЕНЮ И ПРОФИЛЯ (без изменений) ---
+
+@dp.callback_query(F.data == "profile")
+async def show_profile(callback: types.CallbackQuery):
+    user = callback.from_user
+    registration_date = "неизвестна"
+
+    try:
+        chat_info = await bot.get_chat(user.id)
+        if chat_info.date:
+            registration_date = chat_info.date.strftime('%d.%m.%Y')
+    except Exception:
+        registration_date = "недоступна"
+    
+    caption_text = (
+        f"👤 <b>Твой профиль</b>\n\n"
+        f"🆔 Твой ID: <code>{user.id}</code>\n"
+        f"👤 Имя: {user.full_name}\n"
+        f"📅 Дата регистрации: {registration_date}\n\n"
+        f"💸 Чтобы увидеть историю покупок, совершите первый заказ."
+    )
+    
+    try:
+        await callback.message.edit_caption(
+            caption=caption_text,
+            parse_mode="HTML",
+            reply_markup=callback.message.reply_markup
+        )
+    except TelegramBadRequest:
+        await callback.message.edit_text(
+            text=caption_text,
+            parse_mode="HTML",
+            reply_markup=callback.message.reply_markup
+        )
+    await callback.answer() 
+
 @dp.callback_query(F.data == "referral_info")
 async def show_referral_info(callback: types.CallbackQuery):
     user_id = callback.from_user.id
@@ -343,45 +429,6 @@ async def show_referral_info(callback: types.CallbackQuery):
         )
     await callback.answer()
 
-
-# ИСПРАВЛЕНИЕ: Безопасное получение даты и устойчивость edit_caption
-@dp.callback_query(F.data == "profile")
-async def show_profile(callback: types.CallbackQuery):
-    user = callback.from_user
-    registration_date = "неизвестна"
-
-    # --- БЕЗОПАСНОЕ ПОЛУЧЕНИЕ ДАТЫ (ИСПРАВЛЕНИЕ ОШИБКИ) ---
-    try:
-        chat_info = await bot.get_chat(user.id)
-        if chat_info.date:
-            registration_date = chat_info.date.strftime('%d.%m.%Y')
-    except Exception:
-        registration_date = "недоступна"
-    # ----------------------------------------------------
-    
-    caption_text = (
-        f"👤 <b>Твой профиль</b>\n\n"
-        f"🆔 Твой ID: <code>{user.id}</code>\n"
-        f"👤 Имя: {user.full_name}\n"
-        f"📅 Дата регистрации: {registration_date}\n\n"
-        f"💸 Чтобы увидеть историю покупок, совершите первый заказ."
-    )
-    
-    try:
-        await callback.message.edit_caption(
-            caption=caption_text,
-            parse_mode="HTML",
-            reply_markup=callback.message.reply_markup
-        )
-    except TelegramBadRequest:
-        await callback.message.edit_text(
-            text=caption_text,
-            parse_mode="HTML",
-            reply_markup=callback.message.reply_markup
-        )
-    await callback.answer() 
-
-# ИСПРАВЛЕНИЕ: Устойчивость edit_caption
 @dp.callback_query(F.data == "rules")
 async def show_rules(callback: types.CallbackQuery):
     builder = InlineKeyboardBuilder()
@@ -426,7 +473,6 @@ async def cancel_handler(callback: types.CallbackQuery, state: FSMContext):
 
 # --- ЗАПУСК БОТА (ВЫПРАВЛЕНИЕ ДЛЯ RENDER) ---
 
-# ДОДАЄМО aiohttp handle для задоволення вимог Web Service
 async def handle(request):
     """Проста відповідь для Health Check Render."""
     return web.Response(text="Bot is running via polling.")
@@ -434,19 +480,17 @@ async def handle(request):
 async def main():
     db_start()
     
-    # --- БЛОК ЗАПУСКУ ДЛЯ RENDER WEB SERVICE (ПОТРІБЕН ФІНАНСАМИ 0) ---
+    # --- БЛОК ЗАПУСКУ ДЛЯ RENDER WEB SERVICE ---
     
     app = web.Application()
     app.router.add_get('/', handle)
     
-    # Визначаємо порт, який Render буде шукати. Порт береться з Environment Variables
     port = int(os.environ.get('PORT', 8080))
 
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host='0.0.0.0', port=port)
     
-    # Запускаємо Polling та Web-сервер одночасно
     await asyncio.gather(
         dp.start_polling(bot),
         site.start()
