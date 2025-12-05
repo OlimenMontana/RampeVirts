@@ -2,33 +2,32 @@ import asyncio
 import logging
 import sqlite3
 import math 
+import os # Додано для змінних середовища
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.exceptions import TelegramBadRequest # Додано для обробки помилок редагування
-from urllib.parse import urlencode
+from aiogram.exceptions import TelegramBadRequest
+from aiohttp import web # ДОДАНО для запуску веб-сервера на Render
 
-# --- КОНФИГУРАЦИЯ (ОБЯЗАТЕЛЬНО ЗАМЕНИТЬ) ---
+# --- КОНФИГУРАЦИЯ (ЧИТАЕТСЯ ИЗ ПЕРЕМЕННЫХ СРЕДЫ) ---
 
-# !!! ВАЖНО: ЗАМЕНИТЕ ЭТОТ ТОКЕН НА НОВЫЙ ИЗ-ЗА УТЕЧКИ !!!
-API_TOKEN = '8369917812:AAGavVucX12zOQSxMeoOM8zE-e7eg5Qk3bk'          
-ADMIN_ID = 6928797177                    
+# Читаем токен и ID из Environment Variables (это безопасно)
+API_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')          
+ADMIN_ID = int(os.getenv('TELEGRAM_ADMIN_ID')) if os.getenv('TELEGRAM_ADMIN_ID') else None 
+
 SUPPORT_LINK = "https://t.me/liffi1488" 
 CARD_NUMBER = "4323 3473 6140 0119"      
 
-PRICE_PER_1KK = 40                      # Цена в гривнах за 1кк
+PRICE_PER_1KK = 40                      
 FEEDBACK_LINK = "https://t.me/RampeVirtsFeedbacks"
-# ПРЯМАЯ ССЫЛКА НА ФОТО. Вставьте сюда прямое .jpg или .png ссылку, или оставьте None
 PHOTO_URL = None 
 
-# НАГРАДА: Бонус, который получит реферер
-REFERRAL_BONUS_PERCENTAGE = 0.05 # 5% от суммы покупки (0.05)
+REFERRAL_BONUS_PERCENTAGE = 0.05 
 
 
-# --- КОРРЕКТНЫЙ СПИСОК СЕРВЕРОВ (ДЛЯ ИСПРАВЛЕНИЯ КНОПОК) ---
-# Ключ (ID) - для callback_data (короткий), Значение (Имя) - для текста кнопки (полный)
+# --- КОРРЕКТНЫЙ СПИСОК СЕРВЕРОВ ---
 SERVERS_MAPPING = {
     "1": "RED [1]", "2": "GREEN [2]", "3": "BLUE [3]", "4": "YELLOW [4]", "5": "ORANGE [5]",
     "6": "PURPLE [6]", "7": "LIME [7]", "8": "PINK [8]", "9": "CHERRY [9]", "10": "BLACK [10]", 
@@ -92,7 +91,6 @@ def get_user_data(user_id):
 def update_referrer_stats(referrer_id, reward_kk):
     """Обновление статистики реферера после первой покупки приглашенного с учетом награды."""
     cursor = db.cursor()
-    # Увеличиваем счетчик приглашенных и добавляем рассчитанный бонус
     cursor.execute("""
         UPDATE users SET referrals_count = referrals_count + 1, 
         referral_rewards_kk = referral_rewards_kk + ? 
@@ -122,7 +120,6 @@ async def cmd_start(message: types.Message):
     # 1. ПРОВЕРКА РЕФЕРАЛЬНОЙ ССЫЛКИ
     if message.text.startswith('/start ref_'):
         try:
-            # Получаем ID реферера из параметра
             referrer_id = int(message.text.split('_')[1])
             if referrer_id == user_id: 
                 referrer_id = None
@@ -151,7 +148,6 @@ async def cmd_start(message: types.Message):
     )
 
     if PHOTO_URL:
-        # Пытаемся отправить с фото, только если URL указан
         try:
             await message.answer_photo(
                 photo=PHOTO_URL,
@@ -161,15 +157,12 @@ async def cmd_start(message: types.Message):
             )
             return
         except Exception:
-            # Если с фото не удалось (некорректный URL), отправляем просто текст
             pass
             
-    # Отправка просто текста, если PHOTO_URL == None или произошла ошибка
     await message.answer(text=welcome_text, reply_markup=builder.as_markup(), parse_mode="HTML")
 
 
-# ИСПРАВЛЕНИЕ 1: Используем SERVERS_MAPPING для коротких callback_data
-# ИСПРАВЛЕНИЕ 2: Используем try/except для устойчивости edit_caption
+# ИСПРАВЛЕНИЕ: Устойчивость edit_caption
 @dp.callback_query(F.data == "start_buy")
 async def show_servers(callback: types.CallbackQuery, state: FSMContext):
     builder = InlineKeyboardBuilder()
@@ -188,20 +181,18 @@ async def show_servers(callback: types.CallbackQuery, state: FSMContext):
             reply_markup=builder.as_markup()
         )
     except TelegramBadRequest:
-        # Если edit_caption не сработал (оригинал был текстом), используем edit_text
         await callback.message.edit_text(
             text=caption_text, 
             reply_markup=builder.as_markup()
         )
     await state.set_state(BuyState.choosing_server)
 
-# ИСПРАВЛЕНИЕ 1: Получаем полное имя сервера из SERVERS_MAPPING по короткому ID
-# ИСПРАВЛЕНИЕ 2: Также делаем устойчивым edit_caption
+
+# ИСПРАВЛЕНИЕ: Устойчивость edit_caption
 @dp.callback_query(F.data.startswith("srv_"), BuyState.choosing_server)
 async def server_chosen(callback: types.CallbackQuery, state: FSMContext):
     server_id = callback.data.split("_")[1]
     
-    # Используем ID для поиска полного имени из словаря
     server_name = SERVERS_MAPPING.get(server_id, "Неизвестный сервер")
     
     await state.update_data(server=server_name)
@@ -261,7 +252,6 @@ async def process_amount(message: types.Message, state: FSMContext):
         parse_mode="HTML"
     )
 
-# 4. ОБРАБОТЧИК ПОДТВЕРЖДЕНИЯ ОПЛАТЫ (С ЛОГИКОЙ 5% РЕФЕРАЛЬНЫХ)
 @dp.callback_query(F.data == "payment_confirm")
 async def payment_confirmed(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -269,23 +259,18 @@ async def payment_confirmed(callback: types.CallbackQuery, state: FSMContext):
     user_db_data = get_user_data(user.id)
     
     # --- ЛОГИКА РЕФЕРАЛКИ (5% от покупки) ---
-    if user_db_data[2] == 1: # Проверяем, является ли пользователь новым (is_new == 1)
+    if user_db_data and user_db_data[2] == 1: # Проверяем, является ли пользователь новым (is_new == 1)
         referrer_id = user_db_data[1]
-        purchase_price_uah = data['price']
+        purchase_price_uah = data.get('price', 0)
         
-        if referrer_id and purchase_price_uah:
-            # 1. Расчет бонуса в гривнах (5%)
+        if referrer_id and purchase_price_uah > 0:
             reward_uah = purchase_price_uah * REFERRAL_BONUS_PERCENTAGE
-            
-            # 2. Конвертация бонуса в вирты (KK)
             reward_kk = reward_uah / PRICE_PER_1KK
-            reward_kk_rounded = round(reward_kk, 2) # Округляем до 2 знаков после запятой
+            reward_kk_rounded = round(reward_kk, 2)
             
-            # 3. Начисление и обновление статистики
             update_referrer_stats(referrer_id, reward_kk_rounded)
             mark_as_old(user.id)
             
-            # 4. Уведомление рефереру
             try:
                 await bot.send_message(referrer_id, 
                     f"🎉 <b>ПОЗДРАВЛЯЕМ!</b>\n"
@@ -296,21 +281,21 @@ async def payment_confirmed(callback: types.CallbackQuery, state: FSMContext):
                 logging.warning(f"Не удалось уведомить реферера {referrer_id}: {e}")
     # -------------------------
 
-    # ... (Остальная логика отправки сообщения админу) ...
     admin_text = (
         f"🚨 <b>НОВЫЙ ЗАКАЗ!</b>\n\n"
         f"👤 Покупатель: <a href='tg://user?id={user.id}'>{user.full_name}</a> (@{user.username or 'нет юзернейма'})\n"
         f"🆔 ID: <code>{user.id}</code>\n"
-        f"🌍 Сервер: <b>{data['server']}</b>\n"
-        f"📦 Сумма виртов: <b>{data['amount']} кк</b>\n"
-        f"💰 Ожидаемый приход: <b>{data['price']} грн</b>\n\n"
+        f"🌍 Сервер: <b>{data.get('server', 'N/A')}</b>\n"
+        f"📦 Сумма виртов: <b>{data.get('amount', 'N/A')} кк</b>\n"
+        f"💰 Ожидаемый приход: <b>{data.get('price', 'N/A')} грн</b>\n\n"
         f"⚠️ Проверь поступление на карту и свяжись с покупателем!"
     )
     
-    try:
-        await bot.send_message(chat_id=ADMIN_ID, text=admin_text, parse_mode="HTML")
-    except Exception as e:
-        logging.error(f"Ошибка отправки сообщения админу {ADMIN_ID}: {e}")
+    if ADMIN_ID:
+        try:
+            await bot.send_message(chat_id=ADMIN_ID, text=admin_text, parse_mode="HTML")
+        except Exception as e:
+            logging.error(f"Ошибка отправки сообщения админу {ADMIN_ID}: {e}")
 
     await callback.message.edit_text(
         "✅ <b>Заявка отправлена администратору!</b>\n\n"
@@ -320,14 +305,14 @@ async def payment_confirmed(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
 
 
-# 5. ОБРАБОТЧИК КНОПКИ "РЕФЕРАЛКА"
+# ИСПРАВЛЕНИЕ: Устойчивость edit_caption
 @dp.callback_query(F.data == "referral_info")
 async def show_referral_info(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     data = get_user_data(user_id)
     
-    referrals_count = data[3]
-    rewards = data[4]
+    referrals_count = data[3] if data else 0
+    rewards = data[4] if data else 0.0
     
     bot_info = await bot.get_me()
     ref_link = f"https://t.me/{bot_info.username}?start=ref_{user_id}"
@@ -344,7 +329,6 @@ async def show_referral_info(callback: types.CallbackQuery):
         f"💰 <b>Правила:</b> Ты получаешь <b>{REFERRAL_BONUS_PERCENTAGE*100}%</b> от суммы первой покупки каждого друга на бонусный баланс!"
     )
     
-    # --- ИСПРАВЛЕНИЕ: Также делаем устойчивым edit_caption ---
     try:
         await callback.message.edit_caption(
             caption=referral_text,
@@ -360,19 +344,20 @@ async def show_referral_info(callback: types.CallbackQuery):
     await callback.answer()
 
 
+# ИСПРАВЛЕНИЕ: Безопасное получение даты и устойчивость edit_caption
 @dp.callback_query(F.data == "profile")
 async def show_profile(callback: types.CallbackQuery):
     user = callback.from_user
     registration_date = "неизвестна"
 
-    # --- ВИПРАВЛЕННЯ: Безпечне отримання дати реєстрації (це виправляло падіння) ---
+    # --- БЕЗОПАСНОЕ ПОЛУЧЕНИЕ ДАТЫ (ИСПРАВЛЕНИЕ ОШИБКИ) ---
     try:
         chat_info = await bot.get_chat(user.id)
         if chat_info.date:
             registration_date = chat_info.date.strftime('%d.%m.%Y')
     except Exception:
         registration_date = "недоступна"
-    # --- КІНЕЦЬ ВИПРАВЛЕННЯ ---
+    # ----------------------------------------------------
     
     caption_text = (
         f"👤 <b>Твой профиль</b>\n\n"
@@ -382,7 +367,6 @@ async def show_profile(callback: types.CallbackQuery):
         f"💸 Чтобы увидеть историю покупок, совершите первый заказ."
     )
     
-    # --- ИСПРАВЛЕНИЕ: Устойчивость edit_caption ---
     try:
         await callback.message.edit_caption(
             caption=caption_text,
@@ -395,8 +379,9 @@ async def show_profile(callback: types.CallbackQuery):
             parse_mode="HTML",
             reply_markup=callback.message.reply_markup
         )
-    await callback.answer() # Прибирає годинник з кнопки
+    await callback.answer() 
 
+# ИСПРАВЛЕНИЕ: Устойчивость edit_caption
 @dp.callback_query(F.data == "rules")
 async def show_rules(callback: types.CallbackQuery):
     builder = InlineKeyboardBuilder()
@@ -410,7 +395,6 @@ async def show_rules(callback: types.CallbackQuery):
         "4️⃣ <b>Безопасность:</b> Не обсуждайте покупку виртов В ИГРЕ, чтобы избежать бана."
     )
     
-    # --- ИСПРАВЛЕНИЕ: Устойчивость edit_caption ---
     try:
         await callback.message.edit_caption(
             caption=rules_text,
@@ -431,7 +415,6 @@ async def back_to_menu(callback: types.CallbackQuery):
     await cmd_start(callback.message)
     await callback.answer()
 
-# ИСПРАВЛЕНИЕ: Финальный и корректный cancel_handler
 @dp.callback_query(F.data == "cancel")
 async def cancel_handler(callback: types.CallbackQuery, state: FSMContext):
     await state.clear() 
@@ -441,14 +424,40 @@ async def cancel_handler(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# --- ЗАПУСК БОТА ---
+# --- ЗАПУСК БОТА (ВЫПРАВЛЕНИЕ ДЛЯ RENDER) ---
+
+# ДОДАЄМО aiohttp handle для задоволення вимог Web Service
+async def handle(request):
+    """Проста відповідь для Health Check Render."""
+    return web.Response(text="Bot is running via polling.")
 
 async def main():
     db_start()
-    await dp.start_polling(bot)
+    
+    # --- БЛОК ЗАПУСКУ ДЛЯ RENDER WEB SERVICE (ПОТРІБЕН ФІНАНСАМИ 0) ---
+    
+    app = web.Application()
+    app.router.add_get('/', handle)
+    
+    # Визначаємо порт, який Render буде шукати. Порт береться з Environment Variables
+    port = int(os.environ.get('PORT', 8080))
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host='0.0.0.0', port=port)
+    
+    # Запускаємо Polling та Web-сервер одночасно
+    await asyncio.gather(
+        dp.start_polling(bot),
+        site.start()
+    )
+    # ------------------------------------------------------------------
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("Бот остановлен вручную.")
+    if not API_TOKEN:
+        logging.error("TELEGRAM_BOT_TOKEN не встановлено у змінних середовищах!")
+    else:
+        try:
+            asyncio.run(main())
+        except KeyboardInterrupt:
+            print("Бот остановлен вручную.")
