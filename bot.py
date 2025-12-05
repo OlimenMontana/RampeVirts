@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import sqlite3
-import math # Импортируем math для округления
+import math 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -10,7 +10,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from urllib.parse import urlencode
 
 # --- КОНФИГУРАЦИЯ (ОБЯЗАТЕЛЬНО ЗАМЕНИТЬ) ---
-
+# !!! ВАЖНО: ЗАМЕНИТЕ ЭТОТ ТОКЕН НА НОВЫЙ ИЗ-ЗА УТЕЧКИ !!!
 API_TOKEN = '8369917812:AAGavVucX12zOQSxMeoOM8zE-e7eg5Qk3bk'          
 ADMIN_ID = 6928797177                    
 SUPPORT_LINK = "https://t.me/liffi1488" 
@@ -18,33 +18,37 @@ CARD_NUMBER = "4323 3473 6140 0119"
 
 PRICE_PER_1KK = 40                      # Цена в гривнах за 1кк
 FEEDBACK_LINK = "https://t.me/RampeVirtsFeedbacks"
-PHOTO_URL = "https://imgur.com/gallery/KAj4tA8" 
+# ПРЯМАЯ ССЫЛКА НА ФОТО. ЗАМЕНА ССЫЛКИ НА ГАЛЕРЕЮ!
+# Вставьте сюда прямое .jpg или .png ссылку, или оставьте None
+PHOTO_URL = None 
 
 # НАГРАДА: Бонус, который получит реферер
 REFERRAL_BONUS_PERCENTAGE = 0.05 # 5% от суммы покупки (0.05)
 
-SERVERS_LIST = [
-    "RED [1]", "GREEN [2]", "BLUE [3]", "YELLOW [4]", "ORANGE [5]",
-    "PURPLE [6]", "LIME [7]", "PINK [8]", "CHERRY [9]", "BLACK [10]", 
-    "INDIGO [11]", "WHITE [12]", "MAGENTA [13]", "CRIMSON [14]", "GOLD [15]",
-    "AZURE [16]", "PLATINUM [17]", "AQUA [18]", "GRAY [19]", "ICE [20]",
-    "CHILLI [21]", "CHOCO [22]", "MOSCOW [23]", "SPB [24]", "UFA [25]",
-    "SOCHI [26]", "KAZAN [27]", "SAMARA [28]", "ROSTOV [29]", "ANAPA [30]",
-    "EKATERINBURG [31]", "KRASNODAR [32]", "ARZAMAS [33]", "NOVOSIBIRSK [34]",
-    "GROZNY [35]", "SARATOV [36]", "OMSK [37]", "IRKUTSK [38]", "VOLGOGRAD [39]",
-    "VORONEZH [40]", "BELGOROD [41]", "MAKHACHKALA [42]", "VLADIKAVKAZ [43]",
-    "VLADIVOSTOK [44]", "KALININGRAD [45]", "CHELYABINSK [46]", "KRASNOYARSK [47]",
-    "CHEBOKSARY [48]", "KHABAROVSK [49]", "PERM [50]", "TULA [51]", "RYAZAN [52]",
-    "MURMANSK [53]", "PENZA [54]", "KURSK [55]", "ARKHANGELSK [56]", "ORENBURG [57]",
-    "KIROV [58]", "KEMEROVO [59]", "TYUMEN [60]", "TOLYATTI [61]", "IVANOVO [62]",
-    "STAVROPOL [63]", "SMOLENSK [64]", "PSKOV [65]", "BRYANSK [66]", "OREL [67]",
-    "YAROSLAVL [68]", "BARNAUL [69]", "LIPETSK [70]", "ULYANOVSK [71]", "YAKUTSK [72]",
-    "TAMBOV [73]", "BRATSK [74]", "ASTRAKHAN [75]", "CHITA [76]", "KOSTROMA [77]",
-    "VLADIMIR [78]", "KALUGA [79]", "N.NOVGOROD [80]", "TAGANROG [81]", "VOLOGDA [82]",
-    "TVER [83]", "TOMSK [84]", "IZHEVSK [85]", "SURGUT [86]", "PODOLSK [87]",
-    "MAGADAN [88]", "CHEREPOVETS [89]"
-]
 
+# --- КОРРЕКТНЫЙ СПИСОК СЕРВЕРОВ (ДЛЯ ИСПРАВЛЕНИЯ КНОПОК) ---
+# Ключ (ID) - для callback_data (короткий), Значение (Имя) - для текста кнопки (полный)
+SERVERS_MAPPING = {
+    "1": "RED [1]", "2": "GREEN [2]", "3": "BLUE [3]", "4": "YELLOW [4]", "5": "ORANGE [5]",
+    "6": "PURPLE [6]", "7": "LIME [7]", "8": "PINK [8]", "9": "CHERRY [9]", "10": "BLACK [10]", 
+    "11": "INDIGO [11]", "12": "WHITE [12]", "13": "MAGENTA [13]", "14": "CRIMSON [14]", "15": "GOLD [15]",
+    "16": "AZURE [16]", "17": "PLATINUM [17]", "18": "AQUA [18]", "19": "GRAY [19]", "20": "ICE [20]",
+    "21": "CHILLI [21]", "22": "CHOCO [22]", "23": "MOSCOW [23]", "24": "SPB [24]", "25": "UFA [25]",
+    "26": "SOCHI [26]", "27": "KAZAN [27]", "28": "SAMARA [28]", "29": "ROSTOV [29]", "30": "ANAPA [30]",
+    "31": "EKATERINBURG [31]", "32": "KRASNODAR [32]", "33": "ARZAMAS [33]", "34": "NOVOSIBIRSK [34]",
+    "35": "GROZNY [35]", "36": "SARATOV [36]", "37": "OMSK [37]", "38": "IRKUTSK [38]", "39": "VOLGOGRAD [39]",
+    "40": "VORONEZH [40]", "41": "BELGOROD [41]", "42": "MAKHACHKALA [42]", "43": "VLADIKAVKAZ [43]",
+    "44": "VLADIVOSTOK [44]", "45": "KALININGRAD [45]", "46": "CHELYABINSK [46]", "47": "KRASNOYARSK [47]",
+    "48": "CHEBOKSARY [48]", "49": "KHABAROVSK [49]", "50": "PERM [50]", "51": "TULA [51]", "52": "RYAZAN [52]",
+    "53": "MURMANSK [53]", "54": "PENZA [54]", "55": "KURSK [55]", "56": "ARKHANGELSK [56]", "57": "ORENBURG [57]",
+    "58": "KIROV [58]", "59": "KEMEROVO [59]", "60": "TYUMEN [60]", "61": "TOLYATTI [61]", "62": "IVANOVO [62]",
+    "63": "STAVROPOL [63]", "64": "SMOLENSK [64]", "65": "PSKOV [65]", "66": "BRYANSK [66]", "67": "OREL [67]",
+    "68": "YAROSLAVL [68]", "69": "BARNAUL [69]", "70": "LIPETSK [70]", "71": "ULYANOVSK [71]", "72": "YAKUTSK [72]",
+    "73": "TAMBOV [73]", "74": "BRATSK [74]", "75": "ASTRAKHAN [75]", "76": "CHITA [76]", "77": "KOSTROMA [77]",
+    "78": "VLADIMIR [78]", "79": "KALUGA [79]", "80": "N.NOVGOROD [80]", "81": "TAGANROG [81]", "82": "VOLOGDA [82]",
+    "83": "TVER [83]", "84": "TOMSK [84]", "85": "IZHEVSK [85]", "86": "SURGUT [86]", "87": "PODOLSK [87]",
+    "88": "MAGADAN [88]", "89": "CHEREPOVETS [89]"
+}
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
@@ -145,23 +149,32 @@ async def cmd_start(message: types.Message):
         f"👇 Выбирай, что нужно:"
     )
 
-    try:
-        await message.answer_photo(
-            photo=PHOTO_URL,
-            caption=welcome_text,
-            reply_markup=builder.as_markup(),
-            parse_mode="HTML"
-        )
-    except Exception as e:
-        await message.answer(text=welcome_text, reply_markup=builder.as_markup(), parse_mode="HTML")
+    if PHOTO_URL:
+        # Пытаемся отправить с фото, только если URL указан и корректен
+        try:
+            await message.answer_photo(
+                photo=PHOTO_URL,
+                caption=welcome_text,
+                reply_markup=builder.as_markup(),
+                parse_mode="HTML"
+            )
+            return
+        except Exception:
+            # Если с фото не удалось (некорректный URL), отправляем просто текст
+            pass
+            
+    # Отправка просто текста, если PHOTO_URL == None или произошла ошибка
+    await message.answer(text=welcome_text, reply_markup=builder.as_markup(), parse_mode="HTML")
 
 
+# ИСПРАВЛЕНИЕ: Используем SERVERS_MAPPING для создания коротких callback_data
 @dp.callback_query(F.data == "start_buy")
 async def show_servers(callback: types.CallbackQuery, state: FSMContext):
     builder = InlineKeyboardBuilder()
     
-    for server in SERVERS_LIST:
-        builder.button(text=f"🟢 {server}", callback_data=f"srv_{server}")
+    # Итерируемся по словарю, используя ID для callback и полное имя для текста
+    for server_id, server_full_name in SERVERS_MAPPING.items():
+        builder.button(text=f"🟢 {server_full_name}", callback_data=f"srv_{server_id}")
     
     builder.adjust(3)
     builder.button(text="🔙 Назад в меню", callback_data="back_to_menu")
@@ -172,9 +185,14 @@ async def show_servers(callback: types.CallbackQuery, state: FSMContext):
     )
     await state.set_state(BuyState.choosing_server)
 
+# ИСПРАВЛЕНИЕ: Получаем полное имя сервера из SERVERS_MAPPING по короткому ID
 @dp.callback_query(F.data.startswith("srv_"), BuyState.choosing_server)
 async def server_chosen(callback: types.CallbackQuery, state: FSMContext):
-    server_name = callback.data.split("_")[1]
+    # Получаем короткий ID сервера (например, "31")
+    server_id = callback.data.split("_")[1]
+    
+    # Используем ID для поиска полного имени из словаря
+    server_name = SERVERS_MAPPING.get(server_id, "Неизвестный сервер")
     
     await state.update_data(server=server_name)
     
@@ -313,7 +331,7 @@ async def show_referral_info(callback: types.CallbackQuery):
         parse_mode="HTML",
         reply_markup=builder.as_markup()
     )
-# ... (Остальные хендлеры profile, rules, back_to_menu, cancel_handler остаются без изменений)
+
 @dp.callback_query(F.data == "profile")
 async def show_profile(callback: types.CallbackQuery):
     user = callback.from_user
@@ -351,12 +369,11 @@ async def back_to_menu(callback: types.CallbackQuery):
     await callback.message.delete()
     await cmd_start(callback.message)
 
-# Правильний код (з коректною сигнатурою та FSMContext):
+# ИСПРАВЛЕНИЕ: Интегрируем правильный cancel_handler с корректной сигнатурой
 @dp.callback_query(F.data == "cancel")
 async def cancel_handler(callback: types.CallbackQuery, state: FSMContext):
-    await state.clear() # Очищуємо стан
+    await state.clear() 
     
-    # Повідомляємо користувача про скасування та викликаємо головне меню
     await callback.message.edit_text("❌ Покупка отменена. Возвращаемся в главное меню.")
     await cmd_start(callback.message) 
     await callback.answer()
