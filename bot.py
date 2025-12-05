@@ -351,12 +351,16 @@ async def back_to_menu(callback: types.CallbackQuery):
     await callback.message.delete()
     await cmd_start(callback.message)
 
+# Правильний код (з коректною сигнатурою та FSMContext):
 @dp.callback_query(F.data == "cancel")
-async def cancel_handler(callback: types.where(BuyState)):
-    await callback.message.edit_text("❌ Покупка отменена. Введите /start, чтобы начать заново.")
-    await callback.message.delete()
-    await cmd_start(callback.message)
+async def cancel_handler(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear() # Очищуємо стан
+    
+    # Повідомляємо користувача про скасування та викликаємо головне меню
+    await callback.message.edit_text("❌ Покупка отменена. Возвращаемся в главное меню.")
+    await cmd_start(callback.message) 
     await callback.answer()
+
 
 # --- ЗАПУСК БОТА ---
 
