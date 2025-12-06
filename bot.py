@@ -744,14 +744,17 @@ async def show_order_history(callback: types.CallbackQuery):
     await callback.answer()
 
 @dp.callback_query(F.data == "referral_info")
-async def referral_info(callback: types.CallbackQuery):
+async def referral_info(callback: types.CallbackQuery, state: FSMContext): # Добавил state для надежности
+    await state.clear() # На всякий случай сбрасываем состояние
+
     user_data = get_user_data(callback.from_user.id)
     if not user_data:
-        await callback.answer("Ошибка данных пользователя.")
+        await callback.answer("Ошибка данных пользователя. Попробуйте перезапустить бота командой /start.", show_alert=True)
         return
         
     referrer_id, referrals_count, rewards_kk = user_data[1], user_data[3], user_data[4]
     
+    # 1. Формирование контента
     referral_link = f"https://t.me/{callback.bot.username}?start=ref_{callback.from_user.id}"
     
     info_text = (
@@ -767,18 +770,35 @@ async def referral_info(callback: types.CallbackQuery):
     builder = InlineKeyboardBuilder()
     builder.button(text="🔙 Назад в меню", callback_data="back_to_menu")
     
+    # 2. Принудительная отправка/редактирование с обработкой ошибок
     try:
-        await callback.message.edit_caption(
-            caption=info_text,
-            parse_mode="HTML",
-            reply_markup=builder.as_markup()
-        )
+        # Попытка отредактировать текущее сообщение (если это фото, редактируем caption)
+        if callback.message.photo:
+            await callback.message.edit_caption(
+                caption=info_text,
+                parse_mode="HTML",
+                reply_markup=builder.as_markup()
+            )
+        else:
+            await callback.message.edit_text(
+                text=info_text,
+                parse_mode="HTML",
+                reply_markup=builder.as_markup()
+            )
+            
     except TelegramBadRequest:
-        await callback.message.edit_text(
+        # Если редактирование не удалось (например, сообщение слишком старое или не изменено)
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass 
+            
+        await callback.message.answer(
             text=info_text,
-            parse_mode="HTML",
-            reply_markup=builder.as_markup()
+            reply_markup=builder.as_markup(),
+            parse_mode="HTML"
         )
+    
     await callback.answer()
 
 
