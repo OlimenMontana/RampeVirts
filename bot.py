@@ -29,7 +29,7 @@ ADMIN_ID = int(os.getenv('TELEGRAM_ADMIN_ID')) if os.getenv('TELEGRAM_ADMIN_ID')
 
 ПРОЦЕНТ_РЕФЕРАЛА = 0.05 
 
-# --- СПИСОК СЕРВЕРОВ (ОСТАВЛЕН БЕЗ ИЗМЕНЕНИЙ) ---
+# --- СПИСОК СЕРВЕРОВ ---
 SERVERS_MAPPING = {
     "1": "RED [1]", "2": "GREEN [2]", "3": "BLUE [3]", "4": "YELLOW [4]", "5": "ORANGE [5]",
     "6": "PURPLE [6]", "7": "LIME [7]", "8": "PINK [8]", "9": "CHERRY [9]", "10": "BLACK [10]", 
@@ -57,8 +57,13 @@ bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 db = None
 
-# --- БАЗА ДАННЫХ (DB) ---
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
+def get_clean_server_name(full_name: str) -> str:
+    """Извлекает только название сервера без номера в скобках."""
+    return full_name.split(' [')[0]
+
+# --- БАЗА ДАННЫХ (DB) ---
 def db_start():
     """Инициализация базы данных, создание таблиц 'users' и 'orders'."""
     global db
@@ -87,7 +92,7 @@ def db_start():
     """)
     db.commit()
 
-# ... (Функции DB без перевода, так как это технические названия) ...
+# ... (Функции DB: add_user, get_user_data, update_referrer_stats, mark_as_old, add_order, update_order_status, get_user_orders, get_admin_stats - без изменений) ...
 
 def add_user(user_id, referrer_id=None):
     cursor = db.cursor()
@@ -191,7 +196,7 @@ def get_main_menu_content(user_name: str):
 async def send_or_edit_start_menu(callback: types.CallbackQuery, state: FSMContext = None):
     """
     Безопасно возвращает пользователя в главное меню путем редактирования 
-    текущего сообщения или отправки нового (для устранения проблем с кнопками).
+    текущего сообщения или отправки нового.
     """
     if state:
         await state.clear()
@@ -286,30 +291,33 @@ async def cancel_handler(callback: types.CallbackQuery, state: FSMContext):
     await send_or_edit_start_menu(callback)
 
 
-# --- ХЕНДЛЕРЫ: КУПИТЬ ВИРТЫ ---
+# --- ХЕНДЛЕРЫ: КУПИТЬ ВИРТЫ (ИСПРАВЛЕН СПИСОК СЕРВЕРОВ) ---
 
 @dp.callback_query(F.data == "start_buy")
 async def show_servers(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     
     builder = InlineKeyboardBuilder()
-    # Логика отображения серверов (3x3 с пагинацией - для этого кода сокращена)
-    for i in range(1, 10): 
-        server_id = str(i)
-        builder.button(text=SERVERS_MAPPING.get(server_id, f"Сервер {server_id}"), callback_data=f"srv_{server_id}")
     
-    builder.button(text="❌ Отмена", callback_data="cancel")
-    builder.adjust(3, 3, 3, 1)
+    # ИСПРАВЛЕНИЕ: Отображаем ВСЕ серверы, используя чистые названия
+    for server_id, full_name in SERVERS_MAPPING.items():
+        clean_name = get_clean_server_name(full_name) # Используем чистые названия
+        builder.button(text=clean_name, callback_data=f"srv_{server_id}")
+    
+    builder.button(text="🔙 Назад в меню", callback_data="back_to_menu")
+    builder.adjust(4) # Удобная сетка 4хN
 
     try:
         await callback.message.edit_caption(
-            caption="🌍 **Выберите ваш сервер:**",
+            caption="🌍 **Выберите ваш сервер:**\n\n"
+                    "Для быстрого поиска вы можете начать вводить название сервера текстом.",
             parse_mode="HTML",
             reply_markup=builder.as_markup()
         )
     except TelegramBadRequest:
         await callback.message.edit_text(
-            text="🌍 **Выберите ваш сервер:**",
+            text="🌍 **Выберите ваш сервер:**\n\n"
+                 "Для быстрого поиска вы можете начать вводить название сервера текстом.",
             parse_mode="HTML",
             reply_markup=builder.as_markup()
         )
@@ -326,15 +334,13 @@ async def server_chosen(callback: types.CallbackQuery, state: FSMContext):
     builder.button(text="🔙 Назад в меню", callback_data="back_to_menu")
     
     await callback.message.edit_text(
-        f"✅ Выбран сервер: <b>{server_name}</b>\n\n"
+        f"✅ Выбран сервер: <b>{get_clean_server_name(server_name)}</b>\n\n"
         f"🔢 Введите желаемое количество виртов (в миллионах, например, <b>10</b>):",
         parse_mode="HTML",
         reply_markup=builder.as_markup()
     )
     await state.set_state(BuyState.entering_amount)
     await callback.answer()
-
-# ... (Остальные хендлеры покупки виртов, разбана, профиля, рефералки, админки - переведены на RU) ...
 
 @dp.message(F.text, BuyState.entering_amount)
 async def process_amount(message: types.Message, state: FSMContext):
@@ -377,7 +383,7 @@ async def process_nickname(message: types.Message, state: FSMContext):
 
     order_summary = (
         f"✨ <b>Ваш заказ</b> ✨\n"
-        f"🌍 Сервер: <b>{data.get('server')}</b>\n"
+        f"🌍 Сервер: <b>{get_clean_server_name(data.get('server'))}</b>\n"
         f"🎮 Никнейм: <b>{nickname}</b>\n"
         f"💰 Сумма: <b>{data.get('amount')} KK</b>\n"
         f"💵 Итого: <b>{data.get('price')} грн</b>\n\n"
@@ -640,12 +646,10 @@ async def process_unban_payment_proof_error(message: types.Message):
     await message.answer("❌ Ожидается **фотография** или **скриншот** оплаты. Пожалуйста, отправьте его.")
 
 
-# --- ХЕНДЛЕРЫ: ПРОФИЛЬ И АДМИНКА (Переведены) ---
+# --- ХЕНДЛЕРЫ: ПРОФИЛЬ, РЕФЕРАЛКА, ПРАВИЛА (ИСПРАВЛЕНО) ---
 
-# ... (Код для профиля, истории заказов, рефералки и админ-панели) ...
 @dp.callback_query(F.data == "profile")
 async def show_profile(callback: types.CallbackQuery):
-    # ...
     user = callback.from_user
     registration_date = "неизвестна"
 
@@ -706,7 +710,10 @@ async def show_order_history(callback: types.CallbackQuery):
             display_status = status_map.get(status, status)
             
             if order_type == 'virts':
-                summary = f"💰 {details.get('amount_kk')} KK на {details.get('server')}"
+                # Используем чистое имя сервера в истории
+                server_name = details.get('server')
+                clean_server_name = get_clean_server_name(server_name) if server_name else 'N/A'
+                summary = f"💰 {details.get('amount_kk')} KK на {clean_server_name}"
             else:
                 summary = f"🛡️ Разбан аккаунта"
 
@@ -775,6 +782,38 @@ async def referral_info(callback: types.CallbackQuery):
     await callback.answer()
 
 
+@dp.callback_query(F.data == "rules")
+async def show_rules(callback: types.CallbackQuery):
+    """Хендлер для кнопки 'Правила / FAQ'."""
+    rules_text = (
+        "📜 <b>Правила и FAQ</b>\n\n"
+        "1. Мы не несем ответственность за баны аккаунта, если вы совершаете покупку виртов.\n"
+        "2. Выдача виртов происходит только после 100% предоплаты и проверки чека.\n"
+        "3. Разбан аккаунта имеет 99% гарантию.\n"
+        "4. Возврат средств возможен только в исключительных случаях (если администратор не смог выдать вирты или разбанить).\n\n"
+        "❓ **Часто задаваемые вопросы:**\n"
+        "• Как происходит выдача? — Мы заходим на ваш аккаунт и передаем вирты через банк или трейд.\n"
+        "• Это безопасно? — Да, мы используем максимально безопасные методы, но риск всегда есть.\n"
+    )
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔙 Назад в меню", callback_data="back_to_menu")
+    
+    try:
+        await callback.message.edit_caption(
+            caption=rules_text,
+            parse_mode="HTML",
+            reply_markup=builder.as_markup()
+        )
+    except TelegramBadRequest:
+        await callback.message.edit_text(
+            text=rules_text,
+            parse_mode="HTML",
+            reply_markup=builder.as_markup()
+        )
+    await callback.answer()
+
+
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message):
     if message.from_user.id != ADMIN_ID:
@@ -792,9 +831,6 @@ async def cmd_admin(message: types.Message):
     )
     
     await message.answer(stats_text, parse_mode="HTML")
-
-# ... (Хендлеры order_complete_ и order_cancel_ без изменений, так как они технические) ...
-
 
 # --- УСИЛЕНИЕ УСТОЙЧИВОСТИ: CATCH-ALL ХЕНДЛЕРЫ ---
 
