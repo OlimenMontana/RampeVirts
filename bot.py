@@ -61,6 +61,7 @@ db = None
 
 def get_clean_server_name(full_name: str) -> str:
     """Извлекает только название сервера без номера в скобках."""
+    # Обработка случая, когда [N] отсутствует
     return full_name.split(' [')[0]
 
 # --- БАЗА ДАННЫХ (DB) ---
@@ -291,7 +292,7 @@ async def cancel_handler(callback: types.CallbackQuery, state: FSMContext):
     await send_or_edit_start_menu(callback)
 
 
-# --- ХЕНДЛЕРЫ: КУПИТЬ ВИРТЫ (ИСПРАВЛЕН СПИСОК СЕРВЕРОВ) ---
+# --- ХЕНДЛЕРЫ: КУПИТЬ ВИРТЫ ---
 
 @dp.callback_query(F.data == "start_buy")
 async def show_servers(callback: types.CallbackQuery, state: FSMContext):
@@ -299,7 +300,7 @@ async def show_servers(callback: types.CallbackQuery, state: FSMContext):
     
     builder = InlineKeyboardBuilder()
     
-    # ИСПРАВЛЕНИЕ: Отображаем ВСЕ серверы, используя чистые названия
+    # Отображаем ВСЕ серверы, используя чистые названия
     for server_id, full_name in SERVERS_MAPPING.items():
         clean_name = get_clean_server_name(full_name) # Используем чистые названия
         builder.button(text=clean_name, callback_data=f"srv_{server_id}")
@@ -646,7 +647,7 @@ async def process_unban_payment_proof_error(message: types.Message):
     await message.answer("❌ Ожидается **фотография** или **скриншот** оплаты. Пожалуйста, отправьте его.")
 
 
-# --- ХЕНДЛЕРЫ: ПРОФИЛЬ, РЕФЕРАЛКА, ПРАВИЛА (ИСПРАВЛЕНО) ---
+# --- ХЕНДЛЕРЫ: ПРОФИЛЬ, РЕФЕРАЛКА, ПРАВИЛА ---
 
 @dp.callback_query(F.data == "profile")
 async def show_profile(callback: types.CallbackQuery):
@@ -710,7 +711,6 @@ async def show_order_history(callback: types.CallbackQuery):
             display_status = status_map.get(status, status)
             
             if order_type == 'virts':
-                # Используем чистое имя сервера в истории
                 server_name = details.get('server')
                 clean_server_name = get_clean_server_name(server_name) if server_name else 'N/A'
                 summary = f"💰 {details.get('amount_kk')} KK на {clean_server_name}"
@@ -744,8 +744,12 @@ async def show_order_history(callback: types.CallbackQuery):
     await callback.answer()
 
 @dp.callback_query(F.data == "referral_info")
-async def referral_info(callback: types.CallbackQuery, state: FSMContext): # Добавил state для надежности
-    await state.clear() # На всякий случай сбрасываем состояние
+async def referral_info(callback: types.CallbackQuery, state: FSMContext):
+    """
+    ИСКЛЮЧИТЕЛЬНО НАДЕЖНЫЙ ХЕНДЛЕР для Рефералки. 
+    Принудительно удаляет/отправляет сообщение, если редактирование не удалось.
+    """
+    await state.clear() 
 
     user_data = get_user_data(callback.from_user.id)
     if not user_data:
@@ -770,9 +774,8 @@ async def referral_info(callback: types.CallbackQuery, state: FSMContext): # Д�
     builder = InlineKeyboardBuilder()
     builder.button(text="🔙 Назад в меню", callback_data="back_to_menu")
     
-    # 2. Принудительная отправка/редактирование с обработкой ошибок
+    # 2. Принудительная отправка/редактирование
     try:
-        # Попытка отредактировать текущее сообщение (если это фото, редактируем caption)
         if callback.message.photo:
             await callback.message.edit_caption(
                 caption=info_text,
@@ -787,7 +790,7 @@ async def referral_info(callback: types.CallbackQuery, state: FSMContext): # Д�
             )
             
     except TelegramBadRequest:
-        # Если редактирование не удалось (например, сообщение слишком старое или не изменено)
+        # Если редактирование не удалось, отправляем новое сообщение
         try:
             await callback.message.delete()
         except Exception:
