@@ -10,13 +10,14 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiohttp import web 
 
 # --- КОНФИГУРАЦИЯ ---
 
 API_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')          
-ADMIN_ID = int(os.getenv('TELEGRAM_ADMIN_ID')) if os.getenv('TELEGRAM_ADMIN_ID') else None 
+# Установите ваш реальный ID администратора
+ADMIN_ID = int(os.getenv('TELEGRAM_ADMIN_ID', 123456789)) # *** ЗАМЕНИТЕ 123456789 НА ВАШ АДМИН ID ***
 
 ССЫЛКА_ПОДДЕРЖКИ = "https://t.me/liffi1488" 
 НОМЕР_КАРТЫ = "4323 3473 6140 0119"      
@@ -25,7 +26,7 @@ ADMIN_ID = int(os.getenv('TELEGRAM_ADMIN_ID')) if os.getenv('TELEGRAM_ADMIN_ID')
 ЦЕНА_ЗА_1КК = 40                      
 ЦЕНА_РАЗБАНА = 2500 
 ССЫЛКА_ОТЗЫВОВ = "https://t.me/RampeVirtsFeedbacks"
-ФОТО_ПРИВЕТСТВИЯ = None 
+ФОТО_ПРИВЕТСТВИЯ = None # Замените на 'media_id' вашего фото, если используете
 
 ПРОЦЕНТ_РЕФЕРАЛА = 0.05 
 
@@ -61,12 +62,11 @@ db = None
 
 def get_clean_server_name(full_name: str) -> str:
     """Извлекает только название сервера без номера в скобках."""
-    # Обработка случая, когда [N] отсутствует
     return full_name.split(' [')[0]
 
 # --- БАЗА ДАННЫХ (DB) ---
 def db_start():
-    """Инициализация базы данных, создание таблиц 'users' и 'orders'."""
+    """Инициализация базы данных, создание таблиц 'users', 'orders' и 'promocodes'."""
     global db
     db = sqlite3.connect('virts_shop.db')
     cursor = db.cursor()
@@ -91,9 +91,18 @@ def db_start():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS promocodes (
+            code TEXT PRIMARY KEY,
+            discount_percent INTEGER NOT NULL,
+            max_uses INTEGER,
+            current_uses INTEGER DEFAULT 0,
+            is_active INTEGER DEFAULT 1
+        )
+    """)
     db.commit()
 
-# ... (Функции DB: add_user, get_user_data, update_referrer_stats, mark_as_old, add_order, update_order_status, get_user_orders, get_admin_stats - без изменений) ...
+# --- DB-Функции ---
 
 def add_user(user_id, referrer_id=None):
     cursor = db.cursor()
@@ -102,6 +111,11 @@ def add_user(user_id, referrer_id=None):
         cursor.execute("INSERT INTO users (user_id, referrer_id) VALUES (?, ?)", (user_id, referrer_id))
         db.commit()
     
+def get_all_users_ids():
+    cursor = db.cursor()
+    cursor.execute("SELECT user_id FROM users")
+    return [row[0] for row in cursor.fetchall()]
+
 def get_user_data(user_id):
     cursor = db.cursor()
     cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
@@ -131,11 +145,6 @@ def add_order(user_id: int, order_type: str, details: dict, price: float) -> int
     db.commit()
     return cursor.lastrowid
 
-def update_order_status(order_id: int, status: str):
-    cursor = db.cursor()
-    cursor.execute("UPDATE orders SET status = ? WHERE order_id = ?", (status, order_id))
-    db.commit()
-
 def get_user_orders(user_id: int):
     cursor = db.cursor()
     cursor.execute("SELECT * FROM orders WHERE user_id = ? ORDER BY created_at DESC", (user_id,))
@@ -155,11 +164,53 @@ def get_admin_stats():
     
     return total_users, active_orders, total_referral_rewards
 
+# --- DB-Функции для Промокодов ---
+def create_promocode(code: str, discount: int, max_uses: int):
+    cursor = db.cursor()
+    try:
+        cursor.execute("""
+            INSERT INTO promocodes (code, discount_percent, max_uses) 
+            VALUES (?, ?, ?)
+        """, (code.upper(), discount, max_uses))
+        db.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False # Код уже существует
+
+def get_promocode(code: str):
+    cursor = db.cursor()
+    cursor.execute("SELECT * FROM promocodes WHERE code = ? AND is_active = 1", (code.upper(),))
+    result = cursor.fetchone()
+    if result:
+        # code, discount_percent, max_uses, current_uses, is_active
+        return {
+            "code": result[0],
+            "discount": result[1],
+            "max_uses": result[2],
+            "current_uses": result[3],
+        }
+    return None
+
+def use_promocode(code: str):
+    cursor = db.cursor()
+    cursor.execute("""
+        UPDATE promocodes SET current_uses = current_uses + 1 
+        WHERE code = ?
+    """, (code.upper(),))
+    
+    # Деактивация, если достигнут лимит
+    cursor.execute("""
+        UPDATE promocodes SET is_active = 0 
+        WHERE code = ? AND max_uses IS NOT NULL AND current_uses >= max_uses
+    """, (code.upper(),))
+    
+    db.commit()
 
 # --- МАШИНА СОСТОЯНИЙ (FSM) ---
 class BuyState(StatesGroup):
     choosing_server = State()
     entering_amount = State()
+    entering_promocode = State()
     entering_nickname = State() 
     waiting_for_proof = State() 
 
@@ -169,6 +220,12 @@ class UnbanState(StatesGroup):
     waiting_for_property = State()      
     waiting_for_forum_proof = State()  
     waiting_for_payment = State() 
+
+class AdminState(StatesGroup):
+    waiting_for_broadcast_content = State()
+    waiting_for_promo_code = State()
+    waiting_for_promo_discount = State()
+    waiting_for_promo_max_uses = State()
 
 # --- ФУНКЦИИ ГЛАВНОГО МЕНЮ И НАВИГАЦИИ ---
 
@@ -221,7 +278,8 @@ async def send_or_edit_start_menu(callback: types.CallbackQuery, state: FSMConte
             )
             
     except TelegramBadRequest:
-        # Если редактирование не удалось, удаляем старое и отправляем новое
+        # Если редактирование не удалось (например, сообщение слишком старое), 
+        # удаляем старое и отправляем новое
         try:
             await callback.message.delete()
         except Exception:
@@ -285,14 +343,23 @@ async def cancel_handler(callback: types.CallbackQuery, state: FSMContext):
     await state.clear() 
     
     try:
+        # Пытаемся отредактировать
         await callback.message.edit_text("❌ Покупка отменена. Возвращаемся в главное меню.")
     except TelegramBadRequest:
-        await callback.message.edit_caption("❌ Покупка отменена. Возвращаемся в главное меню.")
+        # Если не удалось, пробуем отредактировать caption (для фото) или удалить/отправить новое
+        try:
+            await callback.message.edit_caption("❌ Покупка отменена. Возвращаемся в главное меню.")
+        except Exception:
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
         
+    # Всегда отправляем новое сообщение меню, если редактирование не удалось
     await send_or_edit_start_menu(callback)
 
 
-# --- ХЕНДЛЕРЫ: КУПИТЬ ВИРТЫ ---
+# --- ХЕНДЛЕРЫ: КУПИТЬ ВИРТЫ (С ПРОМОКОДОМ) ---
 
 @dp.callback_query(F.data == "start_buy")
 async def show_servers(callback: types.CallbackQuery, state: FSMContext):
@@ -302,11 +369,11 @@ async def show_servers(callback: types.CallbackQuery, state: FSMContext):
     
     # Отображаем ВСЕ серверы, используя чистые названия
     for server_id, full_name in SERVERS_MAPPING.items():
-        clean_name = get_clean_server_name(full_name) # Используем чистые названия
+        clean_name = get_clean_server_name(full_name) 
         builder.button(text=clean_name, callback_data=f"srv_{server_id}")
     
     builder.button(text="🔙 Назад в меню", callback_data="back_to_menu")
-    builder.adjust(4) # Удобная сетка 4хN
+    builder.adjust(4) 
 
     try:
         await callback.message.edit_caption(
@@ -347,30 +414,89 @@ async def server_chosen(callback: types.CallbackQuery, state: FSMContext):
 async def process_amount(message: types.Message, state: FSMContext):
     try:
         amount_kk = float(message.text)
-        if amount_kk <= 0:
-            raise ValueError
-        
-        # Минимальная сумма
-        if amount_kk < 1:
-            await message.answer("❌ Минимальная сумма покупки - 1 KK.")
+        if amount_kk <= 0 or amount_kk < 1:
+            await message.answer("❌ Минимальная сумма покупки - 1 KK. Введите положительное число.")
             return
 
         price = round(amount_kk * ЦЕНА_ЗА_1КК, 2)
-        await state.update_data(amount=amount_kk, price=price)
+        await state.update_data(amount=amount_kk, price_initial=price)
+
+        builder = InlineKeyboardBuilder()
+        builder.button(text="Ввести промокод", callback_data="enter_promocode")
+        builder.button(text="Пропустить", callback_data="skip_promocode")
+        builder.adjust(2)
+        
+        await message.answer(
+            f"✅ Выбрано: <b>{amount_kk} KK</b>\n"
+            f"💰 Итого без скидки: <b>{price} грн</b>\n\n"
+            f"У вас есть промокод?",
+            parse_mode="HTML",
+            reply_markup=builder.as_markup()
+        )
+        await state.set_state(BuyState.entering_promocode)
+    except ValueError:
+        await message.answer("❌ Неверный формат. Введите число (количество KK), например, <b>15</b>.")
+
+@dp.callback_query(F.data == "enter_promocode", BuyState.entering_promocode)
+async def enter_promocode(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("🎁 **Введите ваш промокод:**", parse_mode="HTML")
+    await callback.answer()
+
+@dp.callback_query(F.data == "skip_promocode", BuyState.entering_promocode)
+async def skip_promocode(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    price = data.get('price_initial')
+    
+    await state.update_data(price=price, promocode_applied=None)
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔙 Назад в меню", callback_data="back_to_menu")
+
+    await callback.message.edit_text(
+        f"💰 Итого к оплате: <b>{price} грн</b>\n\n"
+        f"✍️ Введите ваш никнейм на сервере:",
+        parse_mode="HTML",
+        reply_markup=builder.as_markup()
+    )
+    await state.set_state(BuyState.entering_nickname)
+    await callback.answer()
+
+
+@dp.message(F.text, BuyState.entering_promocode)
+async def process_promocode(message: types.Message, state: FSMContext):
+    code = message.text.strip().upper()
+    promo = get_promocode(code)
+    data = await state.get_data()
+    price_initial = data.get('price_initial')
+    
+    if promo:
+        discount_percent = promo['discount']
+        discount_amount = price_initial * (discount_percent / 100)
+        final_price = round(price_initial - discount_amount, 2)
+        
+        await state.update_data(
+            price=final_price, 
+            promocode_applied=code, 
+            discount_percent=discount_percent
+        )
 
         builder = InlineKeyboardBuilder()
         builder.button(text="🔙 Назад в меню", callback_data="back_to_menu")
 
         await message.answer(
-            f"✅ Сумма: <b>{amount_kk} KK</b>\n"
-            f"💰 Итого к оплате: <b>{price} грн</b>\n\n"
+            f"✅ Промокод <b>{code}</b> активирован! ({discount_percent}% скидка)\n"
+            f"💰 Цена со скидкой: <b>{final_price} грн</b>\n\n"
             f"✍️ Введите ваш никнейм на сервере:",
             parse_mode="HTML",
             reply_markup=builder.as_markup()
         )
         await state.set_state(BuyState.entering_nickname)
-    except ValueError:
-        await message.answer("❌ Неверный формат. Введите число (количество KK), например, <b>15</b>.")
+    else:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="Пропустить", callback_data="skip_promocode")
+        
+        await message.answer("❌ Промокод не найден или недействителен. Вы можете пропустить ввод.", reply_markup=builder.as_markup())
+
 
 @dp.message(F.text, BuyState.entering_nickname)
 async def process_nickname(message: types.Message, state: FSMContext):
@@ -382,11 +508,16 @@ async def process_nickname(message: types.Message, state: FSMContext):
     await state.update_data(nickname=nickname)
     data = await state.get_data()
 
+    promocode_info = ""
+    if data.get('promocode_applied'):
+        promocode_info = f"\n🎁 Промокод: <b>{data.get('promocode_applied')} (-{data.get('discount_percent')}%)</b>"
+
     order_summary = (
         f"✨ <b>Ваш заказ</b> ✨\n"
         f"🌍 Сервер: <b>{get_clean_server_name(data.get('server'))}</b>\n"
         f"🎮 Никнейм: <b>{nickname}</b>\n"
-        f"💰 Сумма: <b>{data.get('amount')} KK</b>\n"
+        f"💰 Сумма: <b>{data.get('amount')} KK</b>"
+        f"{promocode_info}\n"
         f"💵 Итого: <b>{data.get('price')} грн</b>\n\n"
         f"Реквизиты для оплаты:\n"
         f"<code>{НОМЕР_КАРТЫ}</code>\n\n"
@@ -417,19 +548,24 @@ async def process_payment_proof(message: types.Message, state: FSMContext):
     user = message.from_user
     user_db_data = get_user_data(user.id)
     
-    # 1. СОХРАНЕНИЕ ЗАКАЗА В БД
+    # 1. СОХРАНЕНИЕ ЗАКАЗА В БД И АКТИВАЦИЯ ПРОМОКОДА
     order_details = {
         'server': data.get('server'),
         'nickname': data.get('nickname'),
         'amount_kk': data.get('amount'),
-        'proof_photo_id': message.photo[-1].file_id 
+        'proof_photo_id': message.photo[-1].file_id,
+        'promocode_applied': data.get('promocode_applied'),
     }
-    order_id = add_order(user.id, 'virts', order_details, data.get('price'))
+    price = data.get('price')
+    order_id = add_order(user.id, 'virts', order_details, price)
+    
+    if data.get('promocode_applied'):
+        use_promocode(data['promocode_applied'])
 
     # 2. ЛОГИКА РЕФЕРАЛКИ (Только после первого заказа)
     if user_db_data and user_db_data[2] == 1: 
         referrer_id = user_db_data[1]
-        purchase_price_uah = data.get('price', 0)
+        purchase_price_uah = price 
         
         if referrer_id and purchase_price_uah > 0:
             reward_uah = purchase_price_uah * ПРОЦЕНТ_РЕФЕРАЛА
@@ -449,6 +585,8 @@ async def process_payment_proof(message: types.Message, state: FSMContext):
                 logging.warning(f"Не удалось уведомить реферера {referrer_id}: {e}")
     
     # 3. ФОРМИРОВАНИЕ И ОТПРАВКА АДМИНУ (С КНОПКАМИ)
+    promocode_line = f"🎁 Промокод: <b>{data.get('promocode_applied')}</b>\n" if data.get('promocode_applied') else ""
+    
     admin_caption = (
         f"🚨 <b>НОВЫЙ ЗАКАЗ # {order_id} (ВИРТЫ)</b>\n"
         f"--------------------------\n"
@@ -457,7 +595,8 @@ async def process_payment_proof(message: types.Message, state: FSMContext):
         f"🌍 Сервер: <b>{data.get('server', 'N/A')}</b>\n"
         f"🎮 Ник: <b>{data.get('nickname', 'N/A')}</b>\n"
         f"📦 Сумма виртов: <b>{data.get('amount', 'N/A')} кк</b>\n"
-        f"💰 Ожидаемый приход: <b>{data.get('price', 'N/A')} грн</b>\n\n"
+        f"{promocode_line}"
+        f"💰 Итоговая цена: <b>{price} грн</b>\n\n"
         f"⚠️ <b>ЧЕК ПРИКРЕПЛЕН ВЫШЕ</b>"
     )
     
@@ -487,9 +626,14 @@ async def process_payment_proof(message: types.Message, state: FSMContext):
     
     await state.clear()
 
+@dp.message(F.message_text, BuyState.waiting_for_proof)
+async def process_payment_proof_error(message: types.Message):
+    await message.answer("❌ Ожидается **фотография** или **скриншот** оплаты, а не текст. Пожалуйста, отправьте его.")
+
 
 # --- ХЕНДЛЕРЫ: РАЗБАН АККАУНТА ---
 
+# (Оставлены без изменений)
 @dp.callback_query(F.data == "start_unban")
 async def show_unban_info(callback: types.CallbackQuery, state: FSMContext):
     await state.clear() 
@@ -571,7 +715,6 @@ async def process_unban_forum_proof(message: types.Message, state: FSMContext):
     forum_proof = message.photo[-1].file_id if message.photo else message.text
     await state.update_data(forum_proof=forum_proof)
     
-    # --- ВЫВОД РЕКВИЗИТОВ И ЗАПРОС ОПЛАТЫ ---
     payment_text = (
         f"✅ <b>Заявка сформирована!</b>\n\n"
         f"Стоимость: <b>{ЦЕНА_РАЗБАНА} грн</b>\n"
@@ -588,17 +731,15 @@ async def process_unban_payment_proof(message: types.Message, state: FSMContext)
     data = await state.get_data()
     user = message.from_user
     
-    # 1. СОХРАНЕНИЕ ЗАКАЗА В БД
     order_details = {
         'reason': data.get('reason'),
         'property_list': data.get('property_list'),
         'forum_proof': data.get('forum_proof'),
         'screenshot_id': data.get('screenshot_id'),
-        'payment_proof_id': message.photo[-1].file_id # Чек оплаты
+        'payment_proof_id': message.photo[-1].file_id
     }
     order_id = add_order(user.id, 'unban', order_details, ЦЕНА_РАЗБАНА)
     
-    # 2. ФОРМИРОВАНИЕ И ОТПРАВКА АДМИНУ (С КНОПКАМИ)
     admin_caption = (
         f"🚨 <b>НОВАЯ ЗАЯВКА # {order_id} (РАЗБАН)</b>\n"
         f"--------------------------\n"
@@ -634,7 +775,6 @@ async def process_unban_payment_proof(message: types.Message, state: FSMContext)
         except Exception as e:
             logging.error(f"Ошибка отправки чека разбана админу {ADMIN_ID}: {e}")
 
-    # 3. Ответ покупателю
     await message.answer(
         "✅ <b>Скриншот оплаты получен!</b>\n\n"
         "Мы немедленно приступаем к работе по разбану вашего аккаунта. Ожидайте, мы свяжемся с вами для уточнения деталей."
@@ -714,6 +854,8 @@ async def show_order_history(callback: types.CallbackQuery):
                 server_name = details.get('server')
                 clean_server_name = get_clean_server_name(server_name) if server_name else 'N/A'
                 summary = f"💰 {details.get('amount_kk')} KK на {clean_server_name}"
+                if details.get('promocode_applied'):
+                     summary += f" (Промокод: {details.get('promocode_applied')})"
             else:
                 summary = f"🛡️ Разбан аккаунта"
 
@@ -743,12 +885,9 @@ async def show_order_history(callback: types.CallbackQuery):
         )
     await callback.answer()
 
+# *** ФИНАЛЬНО ИСПРАВЛЕННЫЙ ХЕНДЛЕР РЕФЕРАЛКИ ***
 @dp.callback_query(F.data == "referral_info")
 async def referral_info(callback: types.CallbackQuery, state: FSMContext):
-    """
-    ИСКЛЮЧИТЕЛЬНО НАДЕЖНЫЙ ХЕНДЛЕР для Рефералки. 
-    Принудительно удаляет/отправляет сообщение, если редактирование не удалось.
-    """
     await state.clear() 
 
     user_data = get_user_data(callback.from_user.id)
@@ -774,7 +913,7 @@ async def referral_info(callback: types.CallbackQuery, state: FSMContext):
     builder = InlineKeyboardBuilder()
     builder.button(text="🔙 Назад в меню", callback_data="back_to_menu")
     
-    # 2. Принудительная отправка/редактирование
+    # 2. Принудительная отправка/редактирование с обработкой ошибок
     try:
         if callback.message.photo:
             await callback.message.edit_caption(
@@ -837,12 +976,19 @@ async def show_rules(callback: types.CallbackQuery):
     await callback.answer()
 
 
+# --- ХЕНДЛЕРЫ: АДМИН-ПАНЕЛЬ (НОВЫЕ ФУНКЦИИ) ---
+
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         return 
     
     total_users, active_orders, total_referral_rewards = get_admin_stats()
+    
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📢 Начать рассылку", callback_data="admin_broadcast_start")
+    builder.button(text="🎁 Создать промокод", callback_data="admin_create_promo")
+    builder.adjust(1)
     
     stats_text = (
         "👑 <b>АДМИН-ПАНЕЛЬ СТАТИСТИКА</b>\n"
@@ -853,13 +999,144 @@ async def cmd_admin(message: types.Message):
         "-----------------------------------"
     )
     
-    await message.answer(stats_text, parse_mode="HTML")
+    try:
+        # Попытка редактировать, если сообщение пришло из колбека
+        await message.edit_text(stats_text, parse_mode="HTML", reply_markup=builder.as_markup())
+    except AttributeError:
+        # Если это чистая команда /admin
+        await message.answer(stats_text, parse_mode="HTML", reply_markup=builder.as_markup())
+    except TelegramBadRequest:
+        # Если редактирование не удалось
+        await message.answer(stats_text, parse_mode="HTML", reply_markup=builder.as_markup())
+
+# --- АДМИН: РАССЫЛКА ---
+
+@dp.callback_query(F.data == "admin_broadcast_start")
+async def broadcast_start(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    await state.set_state(AdminState.waiting_for_broadcast_content)
+    await callback.message.edit_text("📢 **Режим рассылки.**\n\nПришлите сообщение (текст/фото), которое нужно отправить всем пользователям.", parse_mode="HTML")
+    await callback.answer()
+
+@dp.message(AdminState.waiting_for_broadcast_content)
+async def broadcast_send(message: types.Message, state: FSMContext):
+    await state.clear()
+    
+    user_ids = get_all_users_ids()
+    sent_count = 0
+    blocked_count = 0
+    
+    await message.answer(f"Начинаю рассылку для {len(user_ids)} пользователей. Это может занять время...")
+    
+    for user_id in user_ids:
+        try:
+            if message.text:
+                await bot.send_message(user_id, message.text, parse_mode="HTML")
+            elif message.photo:
+                await bot.send_photo(user_id, message.photo[-1].file_id, caption=message.caption, parse_mode="HTML")
+            
+            sent_count += 1
+            await asyncio.sleep(0.05)
+            
+        except TelegramForbiddenError:
+            blocked_count += 1
+        except TelegramRetryAfter as e:
+            logging.warning(f"Flood control: waiting for {e.retry_after} seconds.")
+            await asyncio.sleep(e.retry_after)
+            try:
+                if message.text:
+                    await bot.send_message(user_id, message.text, parse_mode="HTML")
+                elif message.photo:
+                    await bot.send_photo(user_id, message.photo[-1].file_id, caption=message.caption, parse_mode="HTML")
+                sent_count += 1
+            except Exception:
+                blocked_count += 1
+        except Exception:
+            blocked_count += 1
+            
+    await message.answer(
+        f"✅ **Рассылка завершена.**\n"
+        f"Отправлено: <b>{sent_count}</b>\n"
+        f"Не доставлено (заблокировали): <b>{blocked_count}</b>",
+        parse_mode="HTML"
+    )
+    # Возвращаем админ-панель после рассылки
+    await cmd_admin(message)
+
+
+# --- АДМИН: СОЗДАНИЕ ПРОМОКОДА ---
+
+@dp.callback_query(F.data == "admin_create_promo")
+async def create_promo_start(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    await state.set_state(AdminState.waiting_for_promo_code)
+    await callback.message.edit_text("🎁 **Создание промокода (Шаг 1/3)**\n\nВведите **текст** промокода (например, `SALE2025`):", parse_mode="HTML")
+    await callback.answer()
+
+@dp.message(F.text, AdminState.waiting_for_promo_code)
+async def create_promo_code(message: types.Message, state: FSMContext):
+    code = message.text.strip().upper()
+    if len(code) < 3 or ' ' in code:
+        await message.answer("❌ Код слишком короткий или содержит пробелы. Попробуйте еще.")
+        return
+    
+    # Проверка на существование
+    if get_promocode(code):
+        await message.answer(f"❌ Промокод <b>{code}</b> уже существует. Придумайте другой.", parse_mode="HTML")
+        return
+        
+    await state.update_data(new_promo_code=code)
+    await message.answer("🎁 **Создание промокода (Шаг 2/3)**\n\nВведите **размер скидки** в процентах (целое число, например, `15`):")
+    await state.set_state(AdminState.waiting_for_promo_discount)
+
+@dp.message(F.text, AdminState.waiting_for_promo_discount)
+async def create_promo_discount(message: types.Message, state: FSMContext):
+    try:
+        discount = int(message.text)
+        if not 1 <= discount <= 100:
+            raise ValueError
+        
+        await state.update_data(new_promo_discount=discount)
+        await message.answer("🎁 **Создание промокода (Шаг 3/3)**\n\nВведите **максимальное количество использований** (целое число). Напишите `0`, если ограничений нет:")
+        await state.set_state(AdminState.waiting_for_promo_max_uses)
+    except ValueError:
+        await message.answer("❌ Введите целое число от 1 до 100.")
+
+@dp.message(F.text, AdminState.waiting_for_promo_max_uses)
+async def create_promo_max_uses(message: types.Message, state: FSMContext):
+    try:
+        max_uses = int(message.text)
+        if max_uses < 0:
+            raise ValueError
+            
+        data = await state.get_data()
+        code = data['new_promo_code']
+        discount = data['new_promo_discount']
+        max_uses_final = None if max_uses == 0 else max_uses
+        
+        create_promocode(code, discount, max_uses_final)
+        
+        await message.answer(
+            f"✅ **Промокод создан!**\n\n"
+            f"Код: <b>{code}</b>\n"
+            f"Скидка: <b>{discount}%</b>\n"
+            f"Лимит: <b>{'Безлимитный' if max_uses == 0 else str(max_uses)}</b>",
+            parse_mode="HTML"
+        )
+        await state.clear()
+        # Возвращаем админ-панель после создания промокода
+        await cmd_admin(message)
+
+    except ValueError:
+        await message.answer("❌ Введите целое положительное число или 0.")
 
 # --- УСИЛЕНИЕ УСТОЙЧИВОСТИ: CATCH-ALL ХЕНДЛЕРЫ ---
 
 @dp.callback_query()
 async def unhandled_callback_query(callback: types.CallbackQuery, state: FSMContext):
-    """Ловит любые колбеки, которые не были обработаны (для устранения ошибки 'is not handled')."""
+    """Ловит любые колбеки, которые не были обработаны."""
     current_state = await state.get_state()
     logging.warning(f"Необработанный колбек: User={callback.from_user.id}, Data='{callback.data}', State={current_state}")
     
@@ -869,12 +1146,13 @@ async def unhandled_callback_query(callback: types.CallbackQuery, state: FSMCont
     else:
         # Если находились в главном меню
         await callback.answer("⏳ Не удалось обновить меню. Повторите попытку.")
+        # Принудительно отправляем меню
         await send_or_edit_start_menu(callback, state)
 
 
 @dp.message()
 async def unhandled_message(message: types.Message, state: FSMContext):
-    """Ловит любые текстовые/медиа сообщения, которые не были обработаны в текущем FSM-состоянии."""
+    """Ловит любые сообщения, которые не были обработаны в текущем FSM-состоянии."""
     current_state = await state.get_state()
     
     if current_state:
