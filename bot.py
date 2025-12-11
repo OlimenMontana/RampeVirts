@@ -16,7 +16,7 @@ from aiohttp import web
 # --- КОНФИГУРАЦИЯ ---
 
 API_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')          
-# Если переменная не найдена, используется заглушка (замените на свой ID, если тестируете локально)
+# Если переменная не найдена, используется заглушка (для локального теста)
 ADMIN_ID_RAW = os.getenv('TELEGRAM_ADMIN_ID', '0')
 ADMIN_ID = int(ADMIN_ID_RAW) if ADMIN_ID_RAW.isdigit() else None
 
@@ -472,7 +472,6 @@ async def process_payment_proof_error(message: types.Message):
     await message.answer("❌ Ожидается **фотография** чека, а не текст.")
 
 # --- РАЗБАН ---
-# (Логика аналогична виртам, сокращена для лимита символов, но она тут есть)
 @dp.callback_query(F.data == "start_unban")
 async def show_unban_info(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
@@ -525,7 +524,7 @@ async def process_unban_payment_proof(message: types.Message, state: FSMContext)
     
     admin_text = f"🚨 <b>НОВАЯ ЗАЯВКА # {order_id} (РАЗБАН)</b>\n👤 Клиент: {user.full_name}\n💰 <b>{ЦЕНА_РАЗБАНА} грн</b>"
     builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Выполнено", callback_data=f"order_complete_{order_id}")
+    builder.button(text="✅ Выдать", callback_data=f"order_complete_{order_id}")
     builder.button(text="❌ Отмена", callback_data=f"order_cancel_{order_id}")
     
     if ADMIN_ID:
@@ -600,7 +599,8 @@ async def show_order_history(callback: types.CallbackQuery):
     else:
         for o in orders[:10]:
             dt = datetime.strptime(o[6].split('.')[0], '%Y-%m-%d %H:%M:%S').strftime('%d.%m')
-            text += f"🆔 #{o[0]} | {o[2]} | {o[5]} грн | {dt}\n"
+            status_emoji = "✅" if o[3] == "Completed" else ("❌" if o[3] == "Cancelled" else "⏳")
+            text += f"🆔 #{o[0]} | {o[2]} | {o[5]} грн | {dt} {status_emoji}\n"
             
     builder = InlineKeyboardBuilder()
     builder.button(text="🔙 Назад в меню", callback_data="back_to_menu")
@@ -687,20 +687,76 @@ async def admin_promo_fin(message: types.Message, state: FSMContext):
         await state.clear()
     except: await message.answer("Нужно число.")
 
+# --- УЛУЧШЕННАЯ СИСТЕМА ОБРАБОТКИ ЗАКАЗОВ ДЛЯ АДМИНА ---
+
 @dp.callback_query(F.data.startswith("order_complete_"))
 async def admin_complete(c: types.CallbackQuery):
     if c.from_user.id != ADMIN_ID: return
-    oid = int(c.data.split('_')[2])
-    update_order_status(oid, 'Completed')
-    await c.message.edit_caption(caption=c.message.caption + "\n\n✅ ВЫПОЛНЕНО")
+    
+    order_id = int(c.data.split('_')[2])
+    update_order_status(order_id, 'Completed')
+    
+    # 1. Изменяем сообщение у админа
+    try:
+        await c.message.edit_caption(caption=c.message.caption + "\n\n✅ <b>ВЫПОЛНЕНО</b>", parse_mode="HTML")
+    except: pass
+
+    # 2. УВЕДОМЛЯЕМ ПОЛЬЗОВАТЕЛЯ 
+    cursor = db.cursor()
+    cursor.execute("SELECT user_id, type, details FROM orders WHERE order_id = ?", (order_id,))
+    res = cursor.fetchone()
+    
+    if res:
+        user_id, o_type, details_json = res
+        details = json.loads(details_json)
+        
+        if o_type == 'virts':
+            server_name = get_clean_server_name(details.get('server', 'на сервере'))
+            text = (f"🎉 <b>Заказ #{order_id} готов!</b>\n\n"
+                    f"💰 Вирты ({details.get('amount_kk', 'N/A')} KK) были успешно выданы на сервере <b>{server_name}</b>.\n"
+                    f"Спасибо за покупку! Ждем вас снова.")
+        else:
+            text = (f"🎉 <b>Заказ #{order_id} готов!</b>\n\n"
+                    f"🛡️ Процесс разбана завершен успешно. Проверьте доступ к аккаунту.\n"
+                    f"Спасибо за доверие!")
+        
+        try:
+            await bot.send_message(user_id, text, parse_mode="HTML")
+        except Exception as e:
+            logging.error(f"Не удалось уведомить юзера {user_id} о завершении заказа: {e}")
+
+    await c.answer("Заказ закрыт, клиент уведомлен.")
 
 @dp.callback_query(F.data.startswith("order_cancel_"))
 async def admin_cancel(c: types.CallbackQuery):
     if c.from_user.id != ADMIN_ID: return
-    oid = int(c.data.split('_')[2])
-    update_order_status(oid, 'Cancelled')
-    await c.message.edit_caption(caption=c.message.caption + "\n\n❌ ОТМЕНЕНО")
+    
+    order_id = int(c.data.split('_')[2])
+    update_order_status(order_id, 'Cancelled')
+    
+    # 1. Изменяем сообщение у админа
+    try:
+        await c.message.edit_caption(caption=c.message.caption + "\n\n❌ <b>ОТМЕНЕНО</b>", parse_mode="HTML")
+    except: pass
 
+    # 2. УВЕДОМЛЯЕМ ПОЛЬЗОВАТЕЛЯ 
+    cursor = db.cursor()
+    cursor.execute("SELECT user_id FROM orders WHERE order_id = ?", (order_id,))
+    res = cursor.fetchone()
+    
+    if res:
+        user_id = res[0]
+        try:
+            await bot.send_message(
+                user_id, 
+                f"❌ <b>Заказ #{order_id} отменен.</b>\n\nВозможно, оплата не прошла проверку или данные некорректны. Напишите в поддержку для уточнения: {ССЫЛКА_ПОДДЕРЖКИ}", 
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logging.error(f"Не удалось уведомить юзера {user_id} об отмене заказа: {e}")
+
+    await c.answer("Заказ отменен, клиент уведомлен.")
+    
 # --- CATCH-ALL ---
 @dp.callback_query()
 async def catch_all(c: types.CallbackQuery, state: FSMContext):
