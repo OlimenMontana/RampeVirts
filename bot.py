@@ -16,7 +16,6 @@ from aiohttp import web
 # --- КОНФИГУРАЦИЯ ---
 
 API_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')          
-# Если переменная не найдена, используется заглушка (для локального теста)
 ADMIN_ID_RAW = os.getenv('TELEGRAM_ADMIN_ID', '0')
 ADMIN_ID = int(ADMIN_ID_RAW) if ADMIN_ID_RAW.isdigit() else None
 
@@ -62,7 +61,6 @@ db = None
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
 def get_clean_server_name(full_name: str) -> str:
-    """Извлекает только название сервера без номера в скобках."""
     return full_name.split(' [')[0]
 
 # --- БАЗА ДАННЫХ (DB) ---
@@ -102,15 +100,26 @@ def db_start():
     """)
     db.commit()
 
-# --- DB-Функции ---
+# --- ВАЖНЫЕ DB-Функции ---
 
 def add_user(user_id, referrer_id=None):
     cursor = db.cursor()
-    cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
-    if cursor.fetchone() is None:
+    cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+    existing_user = cursor.fetchone()
+
+    if existing_user is None:
+        # Новый пользователь
         cursor.execute("INSERT INTO users (user_id, referrer_id) VALUES (?, ?)", (user_id, referrer_id))
         db.commit()
         return True
+    else:
+        # Пользователь есть. Если он "новый" (is_new=1) и у него нет реферера, но сейчас он пришел по ссылке — запишем реферера.
+        current_ref = existing_user[1]
+        is_new = existing_user[2]
+        if is_new == 1 and current_ref is None and referrer_id is not None:
+            cursor.execute("UPDATE users SET referrer_id = ? WHERE user_id = ?", (referrer_id, user_id))
+            db.commit()
+            return True
     return False
     
 def get_all_users_ids():
@@ -125,6 +134,16 @@ def get_user_data(user_id):
 
 def update_referrer_stats(referrer_id, reward_kk):
     cursor = db.cursor()
+    
+    # 1. Сначала проверяем, существует ли реферер в базе.
+    # На Render база могла стереться, и реферера "нет", хотя ID нам известен.
+    cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (referrer_id,))
+    if cursor.fetchone() is None:
+        # Если реферера нет, создаем его "профиль" заново, чтобы начислить баллы
+        cursor.execute("INSERT INTO users (user_id, is_new) VALUES (?, 0)", (referrer_id,))
+        logging.info(f"REFERRAL: Resurrected ghost referrer {referrer_id}")
+
+    # 2. Начисляем награду
     cursor.execute("""
         UPDATE users SET referrals_count = referrals_count + 1, 
         referral_rewards_kk = referral_rewards_kk + ? 
@@ -221,7 +240,7 @@ class AdminState(StatesGroup):
     waiting_for_promo_discount = State()
     waiting_for_promo_max_uses = State()
 
-# --- ФУНКЦИИ ГЛАВНОГО МЕНЮ И НАВИГАЦИИ ---
+# --- МЕНЮ ---
 
 def get_main_menu_content(user_name: str):
     builder = InlineKeyboardBuilder()
@@ -270,11 +289,17 @@ async def send_or_edit_start_menu(callback: types.CallbackQuery, state: FSMConte
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
     referrer_id = None
-    if message.text.startswith('/start ref_'):
+    
+    # Парсинг реферальной ссылки
+    args = message.text.split()
+    if len(args) > 1 and args[1].startswith('ref_'):
         try:
-            referrer_id = int(message.text.split('_')[1])
-            if referrer_id == user_id: referrer_id = None
-        except (IndexError, ValueError):
+            r_id = args[1].split('_')[1]
+            if r_id.isdigit():
+                referrer_id = int(r_id)
+                if referrer_id == user_id: 
+                    referrer_id = None # Нельзя пригласить себя
+        except:
             referrer_id = None
     
     add_user(user_id, referrer_id)
@@ -435,13 +460,21 @@ async def process_payment_proof(message: types.Message, state: FSMContext):
     order_id = add_order(user.id, 'virts', order_details, price)
     if data.get('promocode_applied'): use_promocode(data['promocode_applied'])
 
-    # Рефералка
-    if user_db_data and user_db_data[2] == 1:
+    # --- РЕФЕРАЛЬНАЯ ЛОГИКА ---
+    if user_db_data:
         referrer_id = user_db_data[1]
-        if referrer_id and price > 0:
+        is_new_user = user_db_data[2]
+        
+        # Начисляем, только если есть реферер и сумма > 0 (и юзер считается "новым" для бонуса)
+        if referrer_id and price > 0 and is_new_user == 1:
             reward_kk = round((price * ПРОЦЕНТ_РЕФЕРАЛА) / ЦЕНА_ЗА_1КК, 2)
+            
+            # Обновляем реферера (функция теперь сама его воскресит, если он удален)
             update_referrer_stats(referrer_id, reward_kk)
+            
+            # Помечаем покупателя как "старого" (чтобы за него больше не давали бонус, или уберите эту строку если хотите вечный бонус)
             mark_as_old(user.id)
+            
             try:
                 await bot.send_message(referrer_id, f"🎉 <b>ПОЗДРАВЛЯЕМ!</b>\nВаш реферал совершил покупку! Вам начислено <b>{reward_kk} KK</b>.", parse_mode="HTML")
             except Exception: pass
@@ -561,16 +594,19 @@ async def show_profile(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "referral_info")
 async def referral_info(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
-    # 1. ОБЯЗАТЕЛЬНО проверяем/создаем юзера в БД, иначе краш
     add_user(callback.from_user.id)
-    
     user_data = get_user_data(callback.from_user.id)
-    # Если вдруг всё равно нет данных (маловероятно), обрабатываем мягко
+    
+    # Если вдруг user_data None (бывает при жестких багах), создадим заглушку
     if not user_data:
-        await callback.answer("Ошибка базы данных. Попробуйте /start", show_alert=True)
-        return
+        add_user(callback.from_user.id)
+        user_data = get_user_data(callback.from_user.id)
 
-    referrer_id, referrals_count, rewards_kk = user_data[1], user_data[3], user_data[4]
+    if user_data:
+        referrals_count, rewards_kk = user_data[3], user_data[4]
+    else:
+        referrals_count, rewards_kk = 0, 0.0
+
     ref_link = f"https://t.me/{callback.bot.username}?start=ref_{callback.from_user.id}"
     
     text = (f"🤝 <b>Реферальная программа</b>\n\nБонус: <b>5%</b> от покупок друзей.\n\nСсылка: <code>{ref_link}</code>\n"
@@ -585,7 +621,6 @@ async def referral_info(callback: types.CallbackQuery, state: FSMContext):
         else:
             await callback.message.edit_text(text=text, parse_mode="HTML", reply_markup=builder.as_markup())
     except TelegramBadRequest:
-        # Если редактировать нельзя, удаляем и шлем новое (самый надежный способ)
         try: await callback.message.delete()
         except: pass
         await callback.message.answer(text=text, parse_mode="HTML", reply_markup=builder.as_markup())
@@ -621,7 +656,7 @@ async def show_rules(callback: types.CallbackQuery):
         await callback.message.edit_text(text=text, parse_mode="HTML", reply_markup=builder.as_markup())
     await callback.answer()
 
-# --- АДМИН ПАНЕЛЬ ---
+# --- АДМИН ПАНЕЛЬ И ОБРАБОТКА ЗАКАЗОВ ---
 
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message):
@@ -687,8 +722,6 @@ async def admin_promo_fin(message: types.Message, state: FSMContext):
         await state.clear()
     except: await message.answer("Нужно число.")
 
-# --- УЛУЧШЕННАЯ СИСТЕМА ОБРАБОТКИ ЗАКАЗОВ ДЛЯ АДМИНА ---
-
 @dp.callback_query(F.data.startswith("order_complete_"))
 async def admin_complete(c: types.CallbackQuery):
     if c.from_user.id != ADMIN_ID: return
@@ -696,12 +729,10 @@ async def admin_complete(c: types.CallbackQuery):
     order_id = int(c.data.split('_')[2])
     update_order_status(order_id, 'Completed')
     
-    # 1. Изменяем сообщение у админа
     try:
         await c.message.edit_caption(caption=c.message.caption + "\n\n✅ <b>ВЫПОЛНЕНО</b>", parse_mode="HTML")
     except: pass
 
-    # 2. УВЕДОМЛЯЕМ ПОЛЬЗОВАТЕЛЯ 
     cursor = db.cursor()
     cursor.execute("SELECT user_id, type, details FROM orders WHERE order_id = ?", (order_id,))
     res = cursor.fetchone()
@@ -734,12 +765,10 @@ async def admin_cancel(c: types.CallbackQuery):
     order_id = int(c.data.split('_')[2])
     update_order_status(order_id, 'Cancelled')
     
-    # 1. Изменяем сообщение у админа
     try:
         await c.message.edit_caption(caption=c.message.caption + "\n\n❌ <b>ОТМЕНЕНО</b>", parse_mode="HTML")
     except: pass
 
-    # 2. УВЕДОМЛЯЕМ ПОЛЬЗОВАТЕЛЯ 
     cursor = db.cursor()
     cursor.execute("SELECT user_id FROM orders WHERE order_id = ?", (order_id,))
     res = cursor.fetchone()
