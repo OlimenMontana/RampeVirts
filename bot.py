@@ -10,13 +10,15 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiohttp import web
+# 🔥 ИМПОРТ ДЛЯ ИСПРАВЛЕНИЯ ОШИБКИ 🔥
+from aiogram.client.default import DefaultBotProperties 
 
 # === CONFIG ===
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 # Если ID админа не указан, ставим 0, чтобы бот не падал
 ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID", "0"))
 
-# 🔥 ТВОЯ КАРТА ТУТ (добавил пробелы для красоты, но цифры твои)
+# 🔥 ТВОЯ КАРТА ТУТ
 CARD = os.getenv("CARD_NUMBER", "4323 3473 8685 7285")
 
 PRICE_KK = 40
@@ -26,8 +28,8 @@ REF_PERCENT = 0.05  # 5% рефереру
 SUPPORT = "https://t.me/liffi1488"
 REVIEWS = "https://t.me/RampeVirtsFeedbacks"
 
-# Включаем HTML разметку
-bot = Bot(TOKEN, parse_mode="HTML")
+# 🔥 ИСПРАВЛЕННАЯ ИНИЦИАЛИЗАЦИЯ БОТА 🔥
+bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 logging.basicConfig(level=logging.INFO)
 
