@@ -1,810 +1,334 @@
 import asyncio
 import logging
 import sqlite3
-import math 
-import os 
-import json 
-from datetime import datetime 
+import os
+import json
+from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
-from aiohttp import web 
+from aiohttp import web
 
-# --- КОНФИГУРАЦИЯ ---
+# === CONFIG ===
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+# Если ID админа не указан, ставим 0, чтобы бот не падал
+ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID", "0"))
 
-API_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')          
-ADMIN_ID_RAW = os.getenv('TELEGRAM_ADMIN_ID', '0')
-ADMIN_ID = int(ADMIN_ID_RAW) if ADMIN_ID_RAW.isdigit() else None
+# 🔥 ТВОЯ КАРТА ТУТ (добавил пробелы для красоты, но цифры твои)
+CARD = os.getenv("CARD_NUMBER", "4323 3473 8685 7285")
 
-ССЫЛКА_ПОДДЕРЖКИ = "https://t.me/liffi1488" 
-НОМЕР_КАРТЫ = "4323 3473 6140 0119"      
-ССЫЛКА_АККАУНТОВ = "https://t.me/RampeAccounts" 
+PRICE_KK = 40
+UNBAN_PRICE = 2500
+REF_PERCENT = 0.05  # 5% рефереру
 
-ЦЕНА_ЗА_1КК = 40                      
-ЦЕНА_РАЗБАНА = 2500 
-ССЫЛКА_ОТЗЫВОВ = "https://t.me/RampeVirtsFeedbacks"
-ФОТО_ПРИВЕТСТВИЯ = None 
+SUPPORT = "https://t.me/liffi1488"
+REVIEWS = "https://t.me/RampeVirtsFeedbacks"
 
-ПРОЦЕНТ_РЕФЕРАЛА = 0.05 
+# Включаем HTML разметку
+bot = Bot(TOKEN, parse_mode="HTML")
+dp = Dispatcher()
+logging.basicConfig(level=logging.INFO)
 
-# --- СПИСОК СЕРВЕРОВ ---
-SERVERS_MAPPING = {
-    "1": "RED [1]", "2": "GREEN [2]", "3": "BLUE [3]", "4": "YELLOW [4]", "5": "ORANGE [5]",
-    "6": "PURPLE [6]", "7": "LIME [7]", "8": "PINK [8]", "9": "CHERRY [9]", "10": "BLACK [10]", 
-    "11": "INDIGO [11]", "12": "WHITE [12]", "13": "MAGENTA [13]", "14": "CRIMSON [14]", "15": "GOLD [15]",
-    "16": "AZURE [16]", "17": "PLATINUM [17]", "18": "AQUA [18]", "19": "GRAY [19]", "20": "ICE [20]",
-    "21": "CHILLI [21]", "22": "CHOCO [22]", "23": "MOSCOW [23]", "24": "SPB [24]", "25": "UFA [25]",
-    "26": "SOCHI [26]", "27": "KAZAN [27]", "28": "SAMARA [28]", "29": "ROSTOV [29]", "30": "ANAPA [30]",
-    "31": "EKATERINBURG [31]", "32": "KRASNODAR [32]", "33": "ARZAMAS [33]", "34": "NOVOSIBIRSK [34]",
-    "35": "GROZNY [35]", "36": "SARATOV [36]", "37": "OMSK [37]", "38": "IRKUTSK [38]", "39": "VOLGOGRAD [39]",
-    "40": "VORONEZH [40]", "41": "BELGOROD [41]", "42": "MAKHACHKALA [42]", "43": "VLADIKAVKAZ [43]",
-    "44": "VLADIVOSTOK [44]", "45": "KALININGRAD [45]", "46": "CHELYABINSK [46]", "47": "KRASNOYARSK [47]",
-    "48": "CHEBOKSARY [48]", "49": "KHABAROVSK [49]", "50": "PERM [50]", "51": "TULA [51]", "52": "RYAZAN [52]",
-    "53": "MURMANSK [53]", "54": "PENZA [54]", "55": "KURSK [55]", "56": "ARKHANGELSK [56]", "57": "ORENBURG [57]",
-    "58": "KIROV [58]", "59": "KEMEROVO [59]", "60": "TYUMEN [60]", "61": "TOLYATTI [61]", "62": "IVANOVO [62]",
-    "63": "STAVROPOL [63]", "64": "SMOLENSK [64]", "65": "PSKOV [65]", "66": "BRYANSK [66]", "67": "OREL [67]",
-    "68": "YAROSLAVL [68]", "69": "BARNAUL [69]", "70": "LIPETSK [70]", "71": "ULYANOVSK [71]", "72": "YAKUTSK [72]",
-    "73": "TAMBOV [73]", "74": "BRATSK [74]", "75": "ASTRAKHAN [75]", "76": "CHITA [76]", "77": "KOSTROMA [77]",
-    "78": "VLADIMIR [78]", "79": "KALUGA [79]", "80": "N.NOVGOROD [80]", "81": "TAGANROG [81]", "82": "VOLOGDA [82]",
-    "83": "TVER [83]", "84": "TOMSK [84]", "85": "IZHEVSK [85]", "86": "SURGUT [86]", "87": "PODOLSK [87]",
-    "88": "MAGADAN [88]", "89": "CHEREPOVETS [89]"
+# === SERVERS ===
+SERVERS = {
+    "1": "RED", "2": "GREEN", "3": "BLUE", "4": "YELLOW", "5": "ORANGE",
+    "6": "PURPLE", "7": "LIME", "8": "PINK", "9": "CHERRY", "10": "BLACK"
 }
 
-logging.basicConfig(level=logging.INFO)
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher()
-db = None
+# === DB ===
+db = sqlite3.connect("shop.db", check_same_thread=False)
+cur = db.cursor()
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+# Создаем таблицы
+cur.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY,
+    ref_id INTEGER,
+    refs_count INTEGER DEFAULT 0,
+    balance_kk REAL DEFAULT 0
+)""")
 
-def get_clean_server_name(full_name: str) -> str:
-    return full_name.split(' [')[0]
+cur.execute("""
+CREATE TABLE IF NOT EXISTS orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    type TEXT,
+    info TEXT,
+    price REAL,
+    date TEXT
+)""")
 
-# --- БАЗА ДАННЫХ (DB) ---
-def db_start():
-    global db
-    db = sqlite3.connect('virts_shop.db')
-    cursor = db.cursor()
+cur.execute("""
+CREATE TABLE IF NOT EXISTS promos (
+    code TEXT PRIMARY KEY,
+    discount INTEGER,
+    max_uses INTEGER,
+    used INTEGER DEFAULT 0,
+    active INTEGER DEFAULT 1
+)""")
+db.commit()
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            referrer_id INTEGER,
-            is_new INTEGER DEFAULT 1,
-            referrals_count INTEGER DEFAULT 0,
-            referral_rewards_kk REAL DEFAULT 0.0
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS orders (
-            order_id INTEGER PRIMARY KEY,
-            user_id INTEGER,
-            type TEXT, 
-            status TEXT DEFAULT 'Pending_Admin', 
-            details TEXT, 
-            price REAL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS promocodes (
-            code TEXT PRIMARY KEY,
-            discount_percent INTEGER NOT NULL,
-            max_uses INTEGER,
-            current_uses INTEGER DEFAULT 0,
-            is_active INTEGER DEFAULT 1
-        )
-    """)
-    db.commit()
+# === FSM ===
+class Buy(StatesGroup):
+    server = State()
+    amount = State()
+    promo = State()
+    nick = State()
+    proof = State()
 
-# --- ВАЖНЫЕ DB-Функции ---
+class Unban(StatesGroup):
+    screen = State()
+    reason = State()
+    property = State()
+    proof = State()
 
-def add_user(user_id, referrer_id=None):
-    cursor = db.cursor()
-    cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-    existing_user = cursor.fetchone()
+# === MENU ===
+def menu(name):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="💸 Купить вирты", callback_data="buy")
+    kb.button(text="🛡 Разбан", callback_data="unban")
+    kb.button(text="👤 Профиль", callback_data="profile")
+    kb.button(text="🤝 Рефералка", callback_data="ref")
+    kb.button(text="⭐ Отзывы", url=REVIEWS)
+    kb.button(text="👨‍💻 Поддержка", url=SUPPORT)
+    kb.adjust(1, 2, 2, 1)
+    return f"👋 <b>Привет, {name}!</b>\n💰 Курс: {PRICE_KK} грн = 1 KK", kb.as_markup()
 
-    if existing_user is None:
-        # Новый пользователь
-        cursor.execute("INSERT INTO users (user_id, referrer_id) VALUES (?, ?)", (user_id, referrer_id))
-        db.commit()
-        return True
-    else:
-        # Пользователь есть. Если он "новый" (is_new=1) и у него нет реферера, но сейчас он пришел по ссылке — запишем реферера.
-        current_ref = existing_user[1]
-        is_new = existing_user[2]
-        if is_new == 1 and current_ref is None and referrer_id is not None:
-            cursor.execute("UPDATE users SET referrer_id = ? WHERE user_id = ?", (referrer_id, user_id))
-            db.commit()
-            return True
-    return False
-    
-def get_all_users_ids():
-    cursor = db.cursor()
-    cursor.execute("SELECT user_id FROM users")
-    return [row[0] for row in cursor.fetchall()]
-
-def get_user_data(user_id):
-    cursor = db.cursor()
-    cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-    return cursor.fetchone()
-
-def update_referrer_stats(referrer_id, reward_kk):
-    cursor = db.cursor()
-    
-    # 1. Сначала проверяем, существует ли реферер в базе.
-    # На Render база могла стереться, и реферера "нет", хотя ID нам известен.
-    cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (referrer_id,))
-    if cursor.fetchone() is None:
-        # Если реферера нет, создаем его "профиль" заново, чтобы начислить баллы
-        cursor.execute("INSERT INTO users (user_id, is_new) VALUES (?, 0)", (referrer_id,))
-        logging.info(f"REFERRAL: Resurrected ghost referrer {referrer_id}")
-
-    # 2. Начисляем награду
-    cursor.execute("""
-        UPDATE users SET referrals_count = referrals_count + 1, 
-        referral_rewards_kk = referral_rewards_kk + ? 
-        WHERE user_id = ?
-    """, (reward_kk, referrer_id))
-    db.commit()
-
-def mark_as_old(user_id):
-    cursor = db.cursor()
-    cursor.execute("UPDATE users SET is_new = 0 WHERE user_id = ?", (user_id,))
-    db.commit()
-
-def add_order(user_id: int, order_type: str, details: dict, price: float) -> int:
-    cursor = db.cursor()
-    details_json = json.dumps(details)
-    cursor.execute("""
-        INSERT INTO orders (user_id, type, details, price) 
-        VALUES (?, ?, ?, ?)
-    """, (user_id, order_type, details_json, price))
-    db.commit()
-    return cursor.lastrowid
-
-def update_order_status(order_id: int, status: str):
-    cursor = db.cursor()
-    cursor.execute("UPDATE orders SET status = ? WHERE order_id = ?", (status, order_id))
-    db.commit()
-
-def get_user_orders(user_id: int):
-    cursor = db.cursor()
-    cursor.execute("SELECT * FROM orders WHERE user_id = ? ORDER BY created_at DESC", (user_id,))
-    return cursor.fetchall()
-
-def get_admin_stats():
-    cursor = db.cursor()
-    cursor.execute("SELECT COUNT(*) FROM users")
-    total_users = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM orders WHERE status = 'Pending_Admin'")
-    active_orders = cursor.fetchone()[0]
-    cursor.execute("SELECT SUM(referral_rewards_kk) FROM users")
-    total_referral_rewards = cursor.fetchone()[0] or 0.0
-    return total_users, active_orders, total_referral_rewards
-
-# --- DB-Функции для Промокодов ---
-def create_promocode(code: str, discount: int, max_uses: int):
-    cursor = db.cursor()
-    try:
-        cursor.execute("""
-            INSERT INTO promocodes (code, discount_percent, max_uses) 
-            VALUES (?, ?, ?)
-        """, (code.upper(), discount, max_uses))
-        db.commit()
-        return True
-    except sqlite3.IntegrityError:
-        return False 
-
-def get_promocode(code: str):
-    cursor = db.cursor()
-    cursor.execute("SELECT * FROM promocodes WHERE code = ? AND is_active = 1", (code.upper(),))
-    result = cursor.fetchone()
-    if result:
-        return {"code": result[0], "discount": result[1], "max_uses": result[2], "current_uses": result[3]}
-    return None
-
-def use_promocode(code: str):
-    cursor = db.cursor()
-    cursor.execute("""
-        UPDATE promocodes SET current_uses = current_uses + 1 
-        WHERE code = ?
-    """, (code.upper(),))
-    cursor.execute("""
-        UPDATE promocodes SET is_active = 0 
-        WHERE code = ? AND max_uses IS NOT NULL AND current_uses >= max_uses
-    """, (code.upper(),))
-    db.commit()
-
-# --- МАШИНА СОСТОЯНИЙ (FSM) ---
-class BuyState(StatesGroup):
-    choosing_server = State()
-    entering_amount = State()
-    entering_promocode = State()
-    entering_nickname = State() 
-    waiting_for_proof = State() 
-
-class UnbanState(StatesGroup):
-    waiting_for_screenshot = State()
-    waiting_for_reason = State()      
-    waiting_for_property = State()      
-    waiting_for_forum_proof = State()  
-    waiting_for_payment = State() 
-
-class AdminState(StatesGroup):
-    waiting_for_broadcast_content = State()
-    waiting_for_promo_code = State()
-    waiting_for_promo_discount = State()
-    waiting_for_promo_max_uses = State()
-
-# --- МЕНЮ ---
-
-def get_main_menu_content(user_name: str):
-    builder = InlineKeyboardBuilder()
-    builder.button(text="💸 Купить вирты", callback_data="start_buy")
-    builder.button(text="🛡️ Разбан аккаунта", callback_data="start_unban")
-    builder.button(text="👤 Профиль", callback_data="profile")
-    builder.button(text="🤝 Рефералка", callback_data="referral_info") 
-    builder.button(text="⭐ Отзывы", url=ССЫЛКА_ОТЗЫВОВ)
-    builder.button(text="🛍️ Купить аккаунт", url=ССЫЛКА_АККАУНТОВ)
-    builder.button(text="📜 Правила / FAQ", callback_data="rules")
-    builder.button(text="👨‍💻 Поддержка", url=ССЫЛКА_ПОДДЕРЖКИ)
-    builder.adjust(1, 1, 2, 2, 2)
-
-    welcome_text = (
-        f"👋 <b>Привет, {user_name}!</b>\n\n"
-        f"🏰 Лучший магазин валюты Black Russia.\n"
-        f"💰 Курс: <b>{ЦЕНА_ЗА_1КК} грн₴</b> за 1кк.\n"
-        f"👇 Выбирай, что нужно:"
-    )
-    return welcome_text, builder.as_markup()
-
-async def send_or_edit_start_menu(callback: types.CallbackQuery, state: FSMContext = None):
-    if state:
-        await state.clear()
-        
-    user_name = callback.from_user.first_name
-    welcome_text, markup = get_main_menu_content(user_name)
-
-    try:
-        if callback.message.photo:
-            await callback.message.edit_caption(caption=welcome_text, reply_markup=markup, parse_mode="HTML")
-        else:
-            await callback.message.edit_text(text=welcome_text, reply_markup=markup, parse_mode="HTML")
-    except TelegramBadRequest:
-        try:
-            await callback.message.delete()
-        except:
-            pass
-        await bot.send_message(chat_id=callback.from_user.id, text=welcome_text, reply_markup=markup, parse_mode="HTML")
-    
-    await callback.answer()
-
-# --- ХЕНДЛЕРЫ ---
+# === HANDLERS ===
 
 @dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    user_id = message.from_user.id
-    referrer_id = None
-    
-    # Парсинг реферальной ссылки
-    args = message.text.split()
-    if len(args) > 1 and args[1].startswith('ref_'):
-        try:
-            r_id = args[1].split('_')[1]
-            if r_id.isdigit():
-                referrer_id = int(r_id)
-                if referrer_id == user_id: 
-                    referrer_id = None # Нельзя пригласить себя
-        except:
-            referrer_id = None
-    
-    add_user(user_id, referrer_id)
-    welcome_text, markup = get_main_menu_content(message.from_user.first_name)
-
-    if ФОТО_ПРИВЕТСТВИЯ:
-        try:
-            await message.answer_photo(photo=ФОТО_ПРИВЕТСТВИЯ, caption=welcome_text, reply_markup=markup, parse_mode="HTML")
-            return
-        except Exception:
-            pass
-            
-    await message.answer(text=welcome_text, reply_markup=markup, parse_mode="HTML")
-
-@dp.callback_query(F.data == "back_to_menu")
-async def back_to_menu(callback: types.CallbackQuery, state: FSMContext):
-    await send_or_edit_start_menu(callback, state)
-
-@dp.callback_query(F.data == "cancel")
-async def cancel_handler(callback: types.CallbackQuery, state: FSMContext):
-    await state.clear() 
-    try:
-        await callback.message.edit_text("❌ Покупка отменена. Возвращаемся в главное меню.")
-    except TelegramBadRequest:
-        try:
-            await callback.message.edit_caption("❌ Покупка отменена. Возвращаемся в главное меню.")
-        except:
-            pass
-    await send_or_edit_start_menu(callback)
-
-# --- ПОКУПКА ВИРТОВ ---
-
-@dp.callback_query(F.data == "start_buy")
-async def show_servers(callback: types.CallbackQuery, state: FSMContext):
+async def start(m: types.Message, state: FSMContext):
     await state.clear()
-    builder = InlineKeyboardBuilder()
-    for server_id, full_name in SERVERS_MAPPING.items():
-        clean_name = get_clean_server_name(full_name) 
-        builder.button(text=clean_name, callback_data=f"srv_{server_id}")
-    builder.button(text="🔙 Назад в меню", callback_data="back_to_menu")
-    builder.adjust(4) 
-
-    text = "🌍 **Выберите ваш сервер:**\n\nДля быстрого поиска вы можете начать вводить название сервера текстом."
-    try:
-        await callback.message.edit_caption(caption=text, parse_mode="HTML", reply_markup=builder.as_markup())
-    except TelegramBadRequest:
-        await callback.message.edit_text(text=text, parse_mode="HTML", reply_markup=builder.as_markup())
-    await state.set_state(BuyState.choosing_server)
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("srv_"), BuyState.choosing_server)
-async def server_chosen(callback: types.CallbackQuery, state: FSMContext):
-    server_id = callback.data.split('_')[1]
-    server_name = SERVERS_MAPPING.get(server_id, f"Сервер {server_id}")
-    await state.update_data(server_id=server_id, server=server_name)
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🔙 Назад в меню", callback_data="back_to_menu")
-    await callback.message.edit_text(
-        f"✅ Выбран сервер: <b>{get_clean_server_name(server_name)}</b>\n\n🔢 Введите желаемое количество виртов (в миллионах, например, <b>10</b>):",
-        parse_mode="HTML", reply_markup=builder.as_markup()
-    )
-    await state.set_state(BuyState.entering_amount)
-    await callback.answer()
-
-@dp.message(F.text, BuyState.entering_amount)
-async def process_amount(message: types.Message, state: FSMContext):
-    try:
-        amount_kk = float(message.text)
-        if amount_kk < 1:
-            await message.answer("❌ Минимальная сумма покупки - 1 KK. Введите положительное число.")
-            return
-        price = round(amount_kk * ЦЕНА_ЗА_1КК, 2)
-        await state.update_data(amount=amount_kk, price_initial=price)
-        builder = InlineKeyboardBuilder()
-        builder.button(text="Ввести промокод", callback_data="enter_promocode")
-        builder.button(text="Пропустить", callback_data="skip_promocode")
-        builder.adjust(2)
-        await message.answer(f"✅ Выбрано: <b>{amount_kk} KK</b>\n💰 Итого без скидки: <b>{price} грн</b>\n\nУ вас есть промокод?", parse_mode="HTML", reply_markup=builder.as_markup())
-        await state.set_state(BuyState.entering_promocode)
-    except ValueError:
-        await message.answer("❌ Неверный формат. Введите число (количество KK), например, <b>15</b>.")
-
-@dp.callback_query(F.data == "enter_promocode", BuyState.entering_promocode)
-async def enter_promocode(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("🎁 **Введите ваш промокод:**", parse_mode="HTML")
-    await callback.answer()
-
-@dp.callback_query(F.data == "skip_promocode", BuyState.entering_promocode)
-async def skip_promocode(callback: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    price = data.get('price_initial')
-    await state.update_data(price=price, promocode_applied=None)
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🔙 Назад в меню", callback_data="back_to_menu")
-    await callback.message.edit_text(f"💰 Итого к оплате: <b>{price} грн</b>\n\n✍️ Введите ваш никнейм на сервере:", parse_mode="HTML", reply_markup=builder.as_markup())
-    await state.set_state(BuyState.entering_nickname)
-    await callback.answer()
-
-@dp.message(F.text, BuyState.entering_promocode)
-async def process_promocode(message: types.Message, state: FSMContext):
-    code = message.text.strip().upper()
-    promo = get_promocode(code)
-    data = await state.get_data()
-    price_initial = data.get('price_initial')
+    user_id = m.from_user.id
     
-    if promo:
-        discount = promo['discount']
-        final_price = round(price_initial - (price_initial * (discount / 100)), 2)
-        await state.update_data(price=final_price, promocode_applied=code, discount_percent=discount)
-        builder = InlineKeyboardBuilder()
-        builder.button(text="🔙 Назад в меню", callback_data="back_to_menu")
-        await message.answer(f"✅ Промокод <b>{code}</b> активирован! (-{discount}%)\n💰 Цена со скидкой: <b>{final_price} грн</b>\n\n✍️ Введите ваш никнейм на сервере:", parse_mode="HTML", reply_markup=builder.as_markup())
-        await state.set_state(BuyState.entering_nickname)
-    else:
-        builder = InlineKeyboardBuilder()
-        builder.button(text="Пропустить", callback_data="skip_promocode")
-        await message.answer("❌ Промокод не найден.", reply_markup=builder.as_markup())
-
-@dp.message(F.text, BuyState.entering_nickname)
-async def process_nickname(message: types.Message, state: FSMContext):
-    nickname = message.text.strip()
-    if len(nickname) < 3:
-        await message.answer("❌ Никнейм слишком короткий.")
-        return
-    await state.update_data(nickname=nickname)
-    data = await state.get_data()
-    promo_info = f"\n🎁 Промокод: <b>{data.get('promocode_applied')} (-{data.get('discount_percent')}%)</b>" if data.get('promocode_applied') else ""
-    
-    summary = (f"✨ <b>Ваш заказ</b> ✨\n🌍 Сервер: <b>{get_clean_server_name(data.get('server'))}</b>\n"
-               f"🎮 Никнейм: <b>{nickname}</b>\n💰 Сумма: <b>{data.get('amount')} KK</b>{promo_info}\n"
-               f"💵 Итого: <b>{data.get('price')} грн</b>\n\nРеквизиты для оплаты:\n<code>{НОМЕР_КАРТЫ}</code>\n\n"
-               f"После оплаты нажмите кнопку <b>'Я оплатил'</b> и отправьте скриншот чека.")
-    
-    builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Я оплатил", callback_data="payment_confirm")
-    builder.button(text="❌ Отмена", callback_data="cancel")
-    builder.adjust(1)
-    await message.answer(summary, parse_mode="HTML", reply_markup=builder.as_markup())
-    await state.set_state(BuyState.waiting_for_proof)
-
-@dp.callback_query(F.data == "payment_confirm", BuyState.waiting_for_proof)
-async def payment_confirmed_button(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("📸 <b>Отлично! Теперь ожидаем чек.</b>\n\nПожалуйста, **отправьте скриншот или фотографию чека** об оплате в чат.", parse_mode="HTML")
-    await callback.answer()
-
-@dp.message(F.photo, BuyState.waiting_for_proof)
-async def process_payment_proof(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    user = message.from_user
-    user_db_data = get_user_data(user.id)
-    
-    order_details = {
-        'server': data.get('server'), 'nickname': data.get('nickname'),
-        'amount_kk': data.get('amount'), 'proof_photo_id': message.photo[-1].file_id,
-        'promocode_applied': data.get('promocode_applied')
-    }
-    price = data.get('price')
-    order_id = add_order(user.id, 'virts', order_details, price)
-    if data.get('promocode_applied'): use_promocode(data['promocode_applied'])
-
-    # --- РЕФЕРАЛЬНАЯ ЛОГИКА ---
-    if user_db_data:
-        referrer_id = user_db_data[1]
-        is_new_user = user_db_data[2]
-        
-        # Начисляем, только если есть реферер и сумма > 0 (и юзер считается "новым" для бонуса)
-        if referrer_id and price > 0 and is_new_user == 1:
-            reward_kk = round((price * ПРОЦЕНТ_РЕФЕРАЛА) / ЦЕНА_ЗА_1КК, 2)
-            
-            # Обновляем реферера (функция теперь сама его воскресит, если он удален)
-            update_referrer_stats(referrer_id, reward_kk)
-            
-            # Помечаем покупателя как "старого" (чтобы за него больше не давали бонус, или уберите эту строку если хотите вечный бонус)
-            mark_as_old(user.id)
-            
+    # Проверяем, есть ли юзер в базе
+    cur.execute("SELECT id FROM users WHERE id=?", (user_id,))
+    if not cur.fetchone():
+        ref_id = None
+        # Ловим рефералку
+        args = m.text.split()
+        if len(args) > 1 and "ref_" in args[1]:
             try:
-                await bot.send_message(referrer_id, f"🎉 <b>ПОЗДРАВЛЯЕМ!</b>\nВаш реферал совершил покупку! Вам начислено <b>{reward_kk} KK</b>.", parse_mode="HTML")
-            except Exception: pass
+                candidate = int(args[1].split("ref_")[1])
+                if candidate != user_id:
+                    ref_id = candidate
+                    # Обновляем счетчик у пригласившего
+                    cur.execute("UPDATE users SET refs_count=refs_count+1 WHERE id=?", (ref_id,))
+            except: pass
+        
+        cur.execute("INSERT INTO users(id, ref_id) VALUES(?,?)", (user_id, ref_id))
+        db.commit()
 
-    # Админ уведомление
-    promo_line = f"🎁 Промокод: <b>{data.get('promocode_applied')}</b>\n" if data.get('promocode_applied') else ""
-    admin_text = (f"🚨 <b>НОВЫЙ ЗАКАЗ # {order_id} (ВИРТЫ)</b>\n--------------------------\n"
-                  f"👤 Покупатель: <a href='tg://user?id={user.id}'>{user.full_name}</a>\n"
-                  f"🌍 Сервер: <b>{data.get('server', 'N/A')}</b>\n🎮 Ник: <b>{data.get('nickname', 'N/A')}</b>\n"
-                  f"📦 Сумма: <b>{data.get('amount', 'N/A')} кк</b>\n{promo_line}💰 Итого: <b>{price} грн</b>\n\n⚠️ <b>ЧЕК ПРИКРЕПЛЕН ВЫШЕ</b>")
-    
-    builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Выдать", callback_data=f"order_complete_{order_id}")
-    builder.button(text="❌ Отмена", callback_data=f"order_cancel_{order_id}")
-    builder.adjust(1, 1)
+    text, kb = menu(m.from_user.first_name)
+    await m.answer(text, reply_markup=kb)
 
-    if ADMIN_ID:
-        try:
-            await bot.send_photo(chat_id=ADMIN_ID, photo=message.photo[-1].file_id, caption=admin_text, reply_markup=builder.as_markup(), parse_mode="HTML")
-        except Exception as e:
-            logging.error(f"Ошибка отправки чека админу: {e}")
-
-    await message.answer("✅ <b>Чек принят!</b>\n\nВаша заявка отправлена администратору. Ожидайте выдачи.", parse_mode="HTML")
+# --- ПОКУПКА ---
+@dp.callback_query(F.data == "buy")
+async def buy_start(c: types.CallbackQuery, state: FSMContext):
     await state.clear()
+    kb = InlineKeyboardBuilder()
+    for k, v in SERVERS.items():
+        kb.button(text=v, callback_data=f"srv_{k}")
+    kb.button(text="🔙 Назад", callback_data="back")
+    kb.adjust(3)
+    await c.message.edit_text("🌍 <b>Выберите сервер:</b>", reply_markup=kb.as_markup())
 
-@dp.message(F.message_text, BuyState.waiting_for_proof)
-async def process_payment_proof_error(message: types.Message):
-    await message.answer("❌ Ожидается **фотография** чека, а не текст.")
+@dp.callback_query(F.data.startswith("srv_"))
+async def srv_chosen(c: types.CallbackQuery, state: FSMContext):
+    srv_id = c.data.split("_")[1]
+    await state.update_data(server=SERVERS.get(srv_id, "Unknown"))
+    await state.set_state(Buy.amount)
+    await c.message.edit_text("🔢 <b>Введите количество KK (цифрой):</b>")
 
-# --- РАЗБАН ---
-@dp.callback_query(F.data == "start_unban")
-async def show_unban_info(callback: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Оформить заявку", callback_data="unban_start_form")
-    builder.button(text="🔙 Назад в меню", callback_data="back_to_menu")
-    builder.adjust(1)
+@dp.message(F.text, Buy.amount)
+async def amount_entered(m: types.Message, state: FSMContext):
     try:
-        await callback.message.edit_caption(caption=f"🛡️ <b>Разбан аккаунта</b>\n\nСтоимость: <b>{ЦЕНА_РАЗБАНА} грн</b>", parse_mode="HTML", reply_markup=builder.as_markup())
-    except TelegramBadRequest:
-        await callback.message.edit_text(text=f"🛡️ <b>Разбан аккаунта</b>\n\nСтоимость: <b>{ЦЕНА_РАЗБАНА} грн</b>", parse_mode="HTML", reply_markup=builder.as_markup())
-    await callback.answer()
-
-@dp.callback_query(F.data == "unban_start_form")
-async def start_unban_form(callback: types.CallbackQuery, state: FSMContext):
-    await state.set_state(UnbanState.waiting_for_screenshot)
-    await callback.message.edit_text("📸 **1/4: Скриншот блокировки**", parse_mode="HTML")
-    await callback.answer()
-
-@dp.message(F.photo, UnbanState.waiting_for_screenshot)
-async def process_unban_screenshot(message: types.Message, state: FSMContext):
-    await state.update_data(screenshot_id=message.photo[-1].file_id)
-    await message.answer("📝 **2/4: Причина бана**")
-    await state.set_state(UnbanState.waiting_for_reason)
-
-@dp.message(F.text, UnbanState.waiting_for_reason)
-async def process_unban_reason(message: types.Message, state: FSMContext):
-    await state.update_data(reason=message.text)
-    await message.answer("💎 **3/4: Имущество**")
-    await state.set_state(UnbanState.waiting_for_property)
-
-@dp.message(F.text, UnbanState.waiting_for_property)
-async def process_unban_property(message: types.Message, state: FSMContext):
-    await state.update_data(property_list=message.text)
-    await message.answer("🖼️ **4/4: Дополнительные скрины (Опционально)**\nНапишите '-' если нет.")
-    await state.set_state(UnbanState.waiting_for_forum_proof)
-
-@dp.message(UnbanState.waiting_for_forum_proof)
-async def process_unban_forum_proof(message: types.Message, state: FSMContext):
-    fp = message.photo[-1].file_id if message.photo else message.text
-    await state.update_data(forum_proof=fp)
-    await message.answer(f"✅ <b>Заявка сформирована!</b>\nСтоимость: <b>{ЦЕНА_РАЗБАНА} грн</b>\nРеквизиты: <code>{НОМЕР_КАРТЫ}</code>\n\nПришлите чек.", parse_mode="HTML")
-    await state.set_state(UnbanState.waiting_for_payment)
-
-@dp.message(F.photo, UnbanState.waiting_for_payment)
-async def process_unban_payment_proof(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    user = message.from_user
-    order_id = add_order(user.id, 'unban', {'reason': data['reason']}, ЦЕНА_РАЗБАНА)
-    
-    admin_text = f"🚨 <b>НОВАЯ ЗАЯВКА # {order_id} (РАЗБАН)</b>\n👤 Клиент: {user.full_name}\n💰 <b>{ЦЕНА_РАЗБАНА} грн</b>"
-    builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Выдать", callback_data=f"order_complete_{order_id}")
-    builder.button(text="❌ Отмена", callback_data=f"order_cancel_{order_id}")
-    
-    if ADMIN_ID:
-        try:
-            await bot.send_photo(chat_id=ADMIN_ID, photo=data['screenshot_id'], caption="🖼️ СКРИН БЛОКИРОВКИ")
-            await bot.send_photo(chat_id=ADMIN_ID, photo=message.photo[-1].file_id, caption=admin_text, reply_markup=builder.as_markup(), parse_mode="HTML")
-        except: pass
-    await message.answer("✅ <b>Скриншот получен!</b> Ожидайте.")
-    await state.clear()
-
-# --- ИНФО (ПРОФИЛЬ, РЕФЕРАЛКА, ПРАВИЛА) ---
-
-@dp.callback_query(F.data == "profile")
-async def show_profile(callback: types.CallbackQuery):
-    add_user(callback.from_user.id) # Страховка
-    user = callback.from_user
-    try:
-        reg_date = (await bot.get_chat(user.id)).date.strftime('%d.%m.%Y')
+        kk = float(m.text)
+        if kk < 1: raise ValueError
     except:
-        reg_date = "неизвестна"
+        return await m.answer("❌ Введите число больше 1")
     
-    builder = InlineKeyboardBuilder()
-    builder.button(text="📜 История заказов", callback_data="order_history")
-    builder.button(text="🔙 Назад в меню", callback_data="back_to_menu")
-    builder.adjust(1)
-    
-    text = f"👤 <b>Твой профиль</b>\n\n🆔 ID: <code>{user.id}</code>\n👤 Имя: {user.full_name}\n📅 Дата регистрации: {reg_date}"
-    try:
-        await callback.message.edit_caption(caption=text, parse_mode="HTML", reply_markup=builder.as_markup())
-    except TelegramBadRequest:
-        await callback.message.edit_text(text=text, parse_mode="HTML", reply_markup=builder.as_markup())
-    await callback.answer()
+    await state.update_data(kk=kk, raw_price=kk*PRICE_KK)
+    await state.set_state(Buy.promo)
+    await m.answer("🎁 <b>Введите промокод</b> или отправьте «-» чтобы пропустить")
 
-@dp.callback_query(F.data == "referral_info")
-async def referral_info(callback: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    add_user(callback.from_user.id)
-    user_data = get_user_data(callback.from_user.id)
-    
-    # Если вдруг user_data None (бывает при жестких багах), создадим заглушку
-    if not user_data:
-        add_user(callback.from_user.id)
-        user_data = get_user_data(callback.from_user.id)
+@dp.message(F.text, Buy.promo)
+async def promo_entered(m: types.Message, state: FSMContext):
+    data = await state.get_data()
+    price = data['raw_price']
+    code = m.text.strip().upper()
+    used_promo = None
 
-    if user_data:
-        referrals_count, rewards_kk = user_data[3], user_data[4]
-    else:
-        referrals_count, rewards_kk = 0, 0.0
-
-    ref_link = f"https://t.me/{callback.bot.username}?start=ref_{callback.from_user.id}"
-    
-    text = (f"🤝 <b>Реферальная программа</b>\n\nБонус: <b>5%</b> от покупок друзей.\n\nСсылка: <code>{ref_link}</code>\n"
-            f"👥 Друзей: <b>{referrals_count}</b>\n💰 Бонусов: <b>{rewards_kk:.2f} KK</b>")
-    
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🔙 Назад в меню", callback_data="back_to_menu")
-    
-    try:
-        if callback.message.photo:
-            await callback.message.edit_caption(caption=text, parse_mode="HTML", reply_markup=builder.as_markup())
+    if code != "-":
+        cur.execute("SELECT discount, max_uses, used FROM promos WHERE code=? AND active=1", (code,))
+        res = cur.fetchone()
+        if res:
+            # Проверяем лимит
+            if res[1] and res[2] >= res[1]:
+                await m.answer("❌ Промокод закончился. Цена не изменена.")
+            else:
+                disc = res[0]
+                price = price * (1 - disc/100)
+                used_promo = code
+                await m.answer(f"✅ Скидка {disc}% применена!")
         else:
-            await callback.message.edit_text(text=text, parse_mode="HTML", reply_markup=builder.as_markup())
-    except TelegramBadRequest:
-        try: await callback.message.delete()
+            await m.answer("❌ Промокод не найден. Цена не изменена.")
+
+    await state.update_data(final_price=round(price, 2), promo_code=used_promo)
+    await state.set_state(Buy.nick)
+    await m.answer("🎮 <b>Введите ваш Никнейм:</b>")
+
+@dp.message(F.text, Buy.nick)
+async def nick_entered(m: types.Message, state: FSMContext):
+    await state.update_data(nickname=m.text)
+    data = await state.get_data()
+    
+    msg = (f"🧾 <b>Подтверждение заказа</b>\n"
+           f"🌍 Сервер: {data['server']}\n"
+           f"👤 Ник: {data['nickname']}\n"
+           f"💰 Сумма: {data['kk']} KK\n"
+           f"💵 К оплате: <b>{data['final_price']} грн</b>\n\n"
+           f"💳 Карта: <code>{CARD}</code>\n"
+           f"📸 <b>Пришлите скриншот оплаты</b>")
+    
+    await state.set_state(Buy.proof)
+    await m.answer(msg)
+
+@dp.message(F.photo, Buy.proof)
+async def proof_received(m: types.Message, state: FSMContext):
+    data = await state.get_data()
+    user_id = m.from_user.id
+    
+    # 1. Списываем использование промокода (если был)
+    if data.get('promo_code'):
+        cur.execute("UPDATE promos SET used=used+1 WHERE code=?", (data['promo_code'],))
+        # Деактивируем если лимит исчерпан (нужна доп проверка, но для простоты оставим так)
+        db.commit()
+
+    # 2. Начисляем бонус рефереру
+    cur.execute("SELECT ref_id FROM users WHERE id=?", (user_id,))
+    res = cur.fetchone()
+    if res and res[0]:
+        ref_id = res[0]
+        # Бонус в КК: (Сумма заказа / Цена за 1кк) * процент
+        reward = (data['final_price'] / PRICE_KK) * REF_PERCENT
+        cur.execute("UPDATE users SET balance_kk=balance_kk+? WHERE id=?", (reward, ref_id))
+        try:
+            await bot.send_message(ref_id, f"💸 Ваш реферал сделал заказ! Вам начислено <b>{reward:.2f} KK</b>")
         except: pass
-        await callback.message.answer(text=text, parse_mode="HTML", reply_markup=builder.as_markup())
-    await callback.answer()
 
-@dp.callback_query(F.data == "order_history")
-async def show_order_history(callback: types.CallbackQuery):
-    orders = get_user_orders(callback.from_user.id)
-    text = "📜 <b>История (Последние 10):</b>\n\n"
-    if not orders: text += "Нет заказов."
-    else:
-        for o in orders[:10]:
-            dt = datetime.strptime(o[6].split('.')[0], '%Y-%m-%d %H:%M:%S').strftime('%d.%m')
-            status_emoji = "✅" if o[3] == "Completed" else ("❌" if o[3] == "Cancelled" else "⏳")
-            text += f"🆔 #{o[0]} | {o[2]} | {o[5]} грн | {dt} {status_emoji}\n"
-            
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🔙 Назад в меню", callback_data="back_to_menu")
-    try:
-        await callback.message.edit_caption(caption=text, parse_mode="HTML", reply_markup=builder.as_markup())
-    except TelegramBadRequest:
-        await callback.message.edit_text(text=text, parse_mode="HTML", reply_markup=builder.as_markup())
-    await callback.answer()
+    # 3. Сохраняем заказ
+    info_json = json.dumps(data, ensure_ascii=False)
+    cur.execute("INSERT INTO orders(user_id, type, info, price, date) VALUES(?,?,?,?,?)",
+                (user_id, "virts", info_json, data['final_price'], datetime.now().strftime("%Y-%m-%d %H:%M")))
+    db.commit()
 
-@dp.callback_query(F.data == "rules")
-async def show_rules(callback: types.CallbackQuery):
-    text = "📜 <b>Правила</b>\n\n1. Вирты после оплаты.\n2. Гарантия на разбан 99%."
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🔙 Назад в меню", callback_data="back_to_menu")
-    try:
-        await callback.message.edit_caption(caption=text, parse_mode="HTML", reply_markup=builder.as_markup())
-    except TelegramBadRequest:
-        await callback.message.edit_text(text=text, parse_mode="HTML", reply_markup=builder.as_markup())
-    await callback.answer()
+    # 4. Уведомляем админа
+    if ADMIN_ID:
+        admin_msg = (f"🔥 <b>НОВЫЙ ЗАКАЗ!</b>\n"
+                     f"👤 Юзер: {m.from_user.full_name} (ID: {user_id})\n"
+                     f"🌍 Сервер: {data['server']}\n"
+                     f"🎮 Ник: {data['nickname']}\n"
+                     f"💰 Сумма: {data['kk']} KK ({data['final_price']} грн)\n"
+                     f"🎁 Промо: {data.get('promo_code', 'Нет')}")
+        try:
+            await bot.send_photo(ADMIN_ID, m.photo[-1].file_id, caption=admin_msg)
+        except: pass
 
-# --- АДМИН ПАНЕЛЬ И ОБРАБОТКА ЗАКАЗОВ ---
-
-@dp.message(Command("admin"))
-async def cmd_admin(message: types.Message):
-    if message.from_user.id != ADMIN_ID: return
-    stats = get_admin_stats()
-    text = f"👑 <b>Админ-панель</b>\n👥 Юзеров: {stats[0]}\n🛒 Заказов: {stats[1]}"
-    builder = InlineKeyboardBuilder()
-    builder.button(text="📢 Рассылка", callback_data="admin_broadcast")
-    builder.button(text="🎁 Создать промокод", callback_data="admin_promo")
-    builder.adjust(1)
-    await message.answer(text, parse_mode="HTML", reply_markup=builder.as_markup())
-
-@dp.callback_query(F.data == "admin_broadcast")
-async def admin_broadcast(callback: types.CallbackQuery, state: FSMContext):
-    if callback.from_user.id != ADMIN_ID: return
-    await state.set_state(AdminState.waiting_for_broadcast_content)
-    await callback.message.edit_text("📢 Пришлите сообщение для рассылки.")
-    await callback.answer()
-
-@dp.message(AdminState.waiting_for_broadcast_content)
-async def admin_broadcast_send(message: types.Message, state: FSMContext):
+    await m.answer("✅ <b>Оплата принята!</b> Ожидайте выдачи.")
     await state.clear()
-    users = get_all_users_ids()
-    count = 0
-    await message.answer(f"Начинаю рассылку на {len(users)} чел.")
-    for uid in users:
+
+# --- РАЗБАН (Упрощено) ---
+@dp.callback_query(F.data == "unban")
+async def unban_start(c: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await state.set_state(Unban.screen)
+    await c.message.edit_text("📸 <b>Пришлите скриншот окна бана:</b>")
+
+@dp.message(F.photo, Unban.screen)
+async def unban_screen(m: types.Message, state: FSMContext):
+    await state.update_data(screen_id=m.photo[-1].file_id)
+    await state.set_state(Unban.proof)
+    msg = (f"🛡 <b>Разбан аккаунта</b>\n"
+           f"💵 Стоимость: <b>{UNBAN_PRICE} грн</b>\n"
+           f"💳 Карта: <code>{CARD}</code>\n"
+           f"📸 Пришлите чек об оплате.")
+    await m.answer(msg)
+
+@dp.message(F.photo, Unban.proof)
+async def unban_proof(m: types.Message, state: FSMContext):
+    data = await state.get_data()
+    user_id = m.from_user.id
+    
+    cur.execute("INSERT INTO orders(user_id, type, info, price, date) VALUES(?,?,?,?,?)",
+                (user_id, "unban", "Заявка на разбан", UNBAN_PRICE, datetime.now().strftime("%Y-%m-%d %H:%M")))
+    db.commit()
+
+    if ADMIN_ID:
         try:
-            await bot.copy_message(chat_id=uid, from_chat_id=message.chat.id, message_id=message.message_id)
-            count += 1
-            await asyncio.sleep(0.05)
+            await bot.send_photo(ADMIN_ID, data['screen_id'], caption="🖼 Скрин бана")
+            await bot.send_photo(ADMIN_ID, m.photo[-1].file_id, 
+                               caption=f"🛡 <b>ЗАЯВКА НА РАЗБАН</b>\nID: {user_id}\nЧек выше.")
         except: pass
-    await message.answer(f"✅ Отправлено: {count}")
 
-@dp.callback_query(F.data == "admin_promo")
-async def admin_promo(callback: types.CallbackQuery, state: FSMContext):
-    if callback.from_user.id != ADMIN_ID: return
-    await state.set_state(AdminState.waiting_for_promo_code)
-    await callback.message.edit_text("🎁 Введите код (например SALE):")
-    await callback.answer()
+    await m.answer("✅ Заявка принята в работу.")
+    await state.clear()
 
-@dp.message(F.text, AdminState.waiting_for_promo_code)
-async def admin_promo_code(message: types.Message, state: FSMContext):
-    await state.update_data(code=message.text.upper())
-    await state.set_state(AdminState.waiting_for_promo_discount)
-    await message.answer("Введите % скидки (число):")
-
-@dp.message(F.text, AdminState.waiting_for_promo_discount)
-async def admin_promo_disc(message: types.Message, state: FSMContext):
-    try:
-        disc = int(message.text)
-        await state.update_data(discount=disc)
-        await state.set_state(AdminState.waiting_for_promo_max_uses)
-        await message.answer("Введите кол-во использований (0 - безлимит):")
-    except: await message.answer("Нужно число.")
-
-@dp.message(F.text, AdminState.waiting_for_promo_max_uses)
-async def admin_promo_fin(message: types.Message, state: FSMContext):
-    try:
-        uses = int(message.text)
-        data = await state.get_data()
-        create_promocode(data['code'], data['discount'], None if uses==0 else uses)
-        await message.answer(f"✅ Промокод {data['code']} создан!")
-        await state.clear()
-    except: await message.answer("Нужно число.")
-
-@dp.callback_query(F.data.startswith("order_complete_"))
-async def admin_complete(c: types.CallbackQuery):
-    if c.from_user.id != ADMIN_ID: return
+# --- ПРОФИЛЬ / ИНФО ---
+@dp.callback_query(F.data == "profile")
+async def show_profile(c: types.CallbackQuery):
+    user_id = c.from_user.id
+    cur.execute("SELECT COUNT(*) FROM orders WHERE user_id=?", (user_id,))
+    orders_cnt = cur.fetchone()[0]
     
-    order_id = int(c.data.split('_')[2])
-    update_order_status(order_id, 'Completed')
-    
-    try:
-        await c.message.edit_caption(caption=c.message.caption + "\n\n✅ <b>ВЫПОЛНЕНО</b>", parse_mode="HTML")
-    except: pass
+    msg = f"👤 <b>Ваш профиль</b>\n🆔 ID: <code>{user_id}</code>\n🛒 Заказов: <b>{orders_cnt}</b>"
+    kb = InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back").as_markup()
+    await c.message.edit_text(msg, reply_markup=kb)
 
-    cursor = db.cursor()
-    cursor.execute("SELECT user_id, type, details FROM orders WHERE order_id = ?", (order_id,))
-    res = cursor.fetchone()
+@dp.callback_query(F.data == "ref")
+async def show_ref(c: types.CallbackQuery):
+    user_id = c.from_user.id
+    cur.execute("SELECT refs_count, balance_kk FROM users WHERE id=?", (user_id,))
+    res = cur.fetchone()
+    refs, bal = res if res else (0, 0.0)
     
-    if res:
-        user_id, o_type, details_json = res
-        details = json.loads(details_json)
-        
-        if o_type == 'virts':
-            server_name = get_clean_server_name(details.get('server', 'на сервере'))
-            text = (f"🎉 <b>Заказ #{order_id} готов!</b>\n\n"
-                    f"💰 Вирты ({details.get('amount_kk', 'N/A')} KK) были успешно выданы на сервере <b>{server_name}</b>.\n"
-                    f"Спасибо за покупку! Ждем вас снова.")
-        else:
-            text = (f"🎉 <b>Заказ #{order_id} готов!</b>\n\n"
-                    f"🛡️ Процесс разбана завершен успешно. Проверьте доступ к аккаунту.\n"
-                    f"Спасибо за доверие!")
-        
-        try:
-            await bot.send_message(user_id, text, parse_mode="HTML")
-        except Exception as e:
-            logging.error(f"Не удалось уведомить юзера {user_id} о завершении заказа: {e}")
-
-    await c.answer("Заказ закрыт, клиент уведомлен.")
-
-@dp.callback_query(F.data.startswith("order_cancel_"))
-async def admin_cancel(c: types.CallbackQuery):
-    if c.from_user.id != ADMIN_ID: return
+    bot_user = await bot.get_me()
+    link = f"https://t.me/{bot_user.username}?start=ref_{user_id}"
     
-    order_id = int(c.data.split('_')[2])
-    update_order_status(order_id, 'Cancelled')
+    msg = (f"🤝 <b>Реферальная система</b>\n"
+           f"Приглашай друзей и получай {int(REF_PERCENT*100)}% от их покупок!\n\n"
+           f"🔗 Твоя ссылка:\n<code>{link}</code>\n\n"
+           f"👥 Приглашено: {refs}\n"
+           f"💰 Твой баланс: <b>{bal:.2f} KK</b>")
     
-    try:
-        await c.message.edit_caption(caption=c.message.caption + "\n\n❌ <b>ОТМЕНЕНО</b>", parse_mode="HTML")
-    except: pass
+    kb = InlineKeyboardBuilder().button(text="🔙 Назад", callback_data="back").as_markup()
+    await c.message.edit_text(msg, reply_markup=kb)
 
-    cursor = db.cursor()
-    cursor.execute("SELECT user_id FROM orders WHERE order_id = ?", (order_id,))
-    res = cursor.fetchone()
-    
-    if res:
-        user_id = res[0]
-        try:
-            await bot.send_message(
-                user_id, 
-                f"❌ <b>Заказ #{order_id} отменен.</b>\n\nВозможно, оплата не прошла проверку или данные некорректны. Напишите в поддержку для уточнения: {ССЫЛКА_ПОДДЕРЖКИ}", 
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            logging.error(f"Не удалось уведомить юзера {user_id} об отмене заказа: {e}")
+@dp.callback_query(F.data == "back")
+async def back_to_menu(c: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    text, kb = menu(c.from_user.first_name)
+    await c.message.edit_text(text, reply_markup=kb)
 
-    await c.answer("Заказ отменен, клиент уведомлен.")
-    
-# --- CATCH-ALL ---
-@dp.callback_query()
-async def catch_all(c: types.CallbackQuery, state: FSMContext):
-    await c.answer("Ошибка. Перезагрузка меню.")
-    await send_or_edit_start_menu(c, state)
-
-# --- ЗАПУСК ---
-async def handle(request): return web.Response(text="OK")
+# --- WEB SERVER (Для Render) ---
+async def handle(request):
+    return web.Response(text="Bot is alive")
 
 async def main():
-    db_start()
+    # Создаем веб-сервер, чтобы Render не убил бота
     app = web.Application()
     app.router.add_get('/', handle)
-    port = int(os.environ.get('PORT', 8080))
+    
+    # Получаем порт от Render
+    port = int(os.environ.get("PORT", 8080))
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, host='0.0.0.0', port=port)
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    
+    # Запускаем бота и сайт
     await asyncio.gather(dp.start_polling(bot), site.start())
 
 if __name__ == "__main__":
-    if not API_TOKEN: logging.error("NO TOKEN")
-    else: asyncio.run(main())
+    asyncio.run(main())
