@@ -10,7 +10,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiohttp import web
-# 🔥 ИМПОРТ ДЛЯ ИСПРАВЛЕНИЯ ОШИБКИ 🔥
 from aiogram.client.default import DefaultBotProperties 
 
 # === CONFIG ===
@@ -33,10 +32,26 @@ bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 logging.basicConfig(level=logging.INFO)
 
-# === SERVERS ===
+# === SERVERS (ОБНОВЛЕННЫЙ СПИСОК: 89 СЕРВЕРОВ) ===
 SERVERS = {
     "1": "RED", "2": "GREEN", "3": "BLUE", "4": "YELLOW", "5": "ORANGE",
-    "6": "PURPLE", "7": "LIME", "8": "PINK", "9": "CHERRY", "10": "BLACK"
+    "6": "PURPLE", "7": "LIME", "8": "PINK", "9": "CHERRY", "10": "BLACK",
+    "11": "INDIGO", "12": "WHITE", "13": "MAGENTA", "14": "CRIMSON", "15": "GOLD",
+    "16": "AZURE", "17": "PLATINUM", "18": "AQUA", "19": "GRAY", "20": "ICE",
+    "21": "CHILLI", "22": "CHOCO", "23": "MOSCOW", "24": "SPB", "25": "UFA",
+    "26": "SOCHI", "27": "KAZAN", "28": "SAMARA", "29": "ROSTOV", "30": "ANAPA",
+    "31": "EKATERINBURG", "32": "KRASNODAR", "33": "ARZAMAS", "34": "NOVOSIBIRSK", "35": "GROZNY",
+    "36": "SARATOV", "37": "OMSK", "38": "IRKUTSK", "39": "VOLGOGRAD", "40": "VORONEZH",
+    "41": "BELGOROD", "42": "MAKHACHKALA", "43": "VLADIKAVKAZ", "44": "VLADIVOSTOK", "45": "KALININGRAD",
+    "46": "CHELYABINSK", "47": "KRASNOYARSK", "48": "CHEBOKSARY", "49": "KHABAROVSK", "50": "PERM",
+    "51": "TULA", "52": "RYAZAN", "53": "MURMANSK", "54": "PENZA", "55": "KURSK",
+    "56": "ARKHANGELSK", "57": "ORENBURG", "58": "KIROV", "59": "KEMEROVO", "60": "TYUMEN",
+    "61": "TOLYATTI", "62": "IVANOVO", "63": "STAVROPOL", "64": "SMOLENSK", "65": "PSKOV",
+    "66": "BRYANSK", "67": "OREL", "68": "YAROSLAVL", "69": "BARNAUL", "70": "LIPETSK",
+    "71": "ULYANOVSK", "72": "YAKUTSK", "73": "TAMBOV", "74": "BRATSK", "75": "ASTRAKHAN",
+    "76": "CHITA", "77": "KOSTROMA", "78": "VLADIMIR", "79": "KALUGA", "80": "N.NOVGOROD",
+    "81": "TAGANROG", "82": "VOLOGDA", "83": "TVER", "84": "TOMSK", "85": "IZHEVSK",
+    "86": "SURGUT", "87": "PODOLSK", "88": "MAGADAN", "89": "CHEREPOVETS"
 }
 
 # === DB ===
@@ -131,16 +146,17 @@ async def start(m: types.Message, state: FSMContext):
 async def buy_start(c: types.CallbackQuery, state: FSMContext):
     await state.clear()
     kb = InlineKeyboardBuilder()
+    # Изменено: Используем более компактное размещение кнопок для 89 серверов (4 в ряд)
     for k, v in SERVERS.items():
-        kb.button(text=v, callback_data=f"srv_{k}")
+        kb.button(text=f"{v} [{k}]", callback_data=f"srv_{k}")
     kb.button(text="🔙 Назад", callback_data="back")
-    kb.adjust(3)
+    kb.adjust(4) # 4 кнопки в ряд
     await c.message.edit_text("🌍 <b>Выберите сервер:</b>", reply_markup=kb.as_markup())
 
 @dp.callback_query(F.data.startswith("srv_"))
 async def srv_chosen(c: types.CallbackQuery, state: FSMContext):
     srv_id = c.data.split("_")[1]
-    await state.update_data(server=SERVERS.get(srv_id, "Unknown"))
+    await state.update_data(server=f"{SERVERS.get(srv_id, 'Unknown')} [{srv_id}]") # Сохраняем название + ID
     await state.set_state(Buy.amount)
     await c.message.edit_text("🔢 <b>Введите количество KK (цифрой):</b>")
 
